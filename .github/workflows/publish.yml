@@ -1,0 +1,124 @@
+name: Publish
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/cpp-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve immutable build inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_digest="$(docker buildx imagetools inspect ubuntu:24.04 --format '{{.Digest}}')"
+          pace_ref="$(git ls-remote https://github.com/LASTRADA-Software/pace.git refs/heads/master | awk '{print $1}')"
+          test -n "$base_digest"
+          test -n "$pace_ref"
+          {
+            echo "base_image=ubuntu:24.04@${base_digest}"
+            echo "pace_ref=${pace_ref}"
+            # Pull requests validate the build only; nothing is pushed.
+            if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+              echo "publish=false"
+            else
+              echo "publish=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+
+      # Build into the local Docker daemon so the smoke test runs against the
+      # exact bits that would be pushed.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          build-args: |
+            BASE_IMAGE=${{ steps.inputs.outputs.base_image }}
+            PACE_REF=${{ steps.inputs.outputs.pace_ref }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.lastrada.pace.ref=${{ steps.inputs.outputs.pace_ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" bash -euo pipefail -c '
+            for tool in gcc g++ gcc-14 g++-14 clang clang++ clang-tidy \
+                        clang-22 clang++-22 clang-tidy-22 cmake ninja \
+                        pkg-config pace-cc pace-kv; do
+              command -v "$tool" >/dev/null || { echo "missing: $tool"; exit 1; }
+            done
+            gcc --version | head -n1
+            clang++ --version | head -n1
+            cmake --version | head -n1
+            ninja --version
+            # Shared-library resolution is the failure mode most likely to
+            # slip past a build-only check.
+            for bin in /opt/pace/bin/pace-cc /opt/pace/bin/pace-kv; do
+              if ldd "$bin" | grep -q "not found"; then
+                echo "unresolved libraries in $bin"; ldd "$bin"; exit 1
+              fi
+            done
+            test -d "$PACE_CACHE_SEED_DIR"
+            # Compile and link a trivial C++ program with each compiler.
+            tmp="$(mktemp -d)"
+            printf "#include <cstdio>\nint main(){std::puts(\"ok\");}\n" > "$tmp/t.cpp"
+            g++ -std=c++23 -o "$tmp/gcc-t" "$tmp/t.cpp"
+            clang++ -std=c++23 -stdlib=libstdc++ -o "$tmp/clang-t" "$tmp/t.cpp"
+            "$tmp/gcc-t" && "$tmp/clang-t"
+          '
+        env:
+          IMAGE: ${{ env.IMAGE }}
+
+      - uses: docker/login-action@v3
+        if: steps.inputs.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Every smoke-tested build on master gets an immutable <sha> tag, and
+      # the moving `latest` tag is advanced to it. Consumers reference `latest`,
+      # so a new master build reaches all CI runs on their next job start.
+      # Rolling back means re-pointing `latest` at an earlier <sha> tag.
+      - name: Push image
+        if: steps.inputs.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi
+        env:
+          IMAGE: ${{ env.IMAGE }}
