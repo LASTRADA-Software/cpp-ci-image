@@ -35,7 +35,16 @@ jobs:
         run: |
           set -euo pipefail
           # Parse the plain-text output: the --format templates differ between buildx versions.
-          base_digest="$(docker buildx imagetools inspect ubuntu:24.04 | awk '/^Digest:/{print $2; exit}')"
+          # Retry, and show the registry's error on failure rather than hiding it.
+          base_digest=""
+          for attempt in 1 2 3; do
+            if out="$(docker buildx imagetools inspect ubuntu:24.04 2>&1)"; then
+              base_digest="$(printf '%s\n' "$out" | awk '/^Digest:/{print $2; exit}')"
+              [ -n "$base_digest" ] && break
+            fi
+            echo "attempt $attempt failed:"; printf '%s\n' "$out"; sleep 15
+          done
+          test -n "$base_digest"
           test -n "$base_digest"
           pace_ref="$(git ls-remote https://github.com/LASTRADA-Software/pace.git refs/heads/master | awk '{print $1}')"
           test -n "$pace_ref"
