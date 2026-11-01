@@ -16,146 +16,110 @@ authenticated `pace-kv` alone does not distinguish cache readers from writers.
 
 ## Publishing
 
-The workflow resolves an immutable Ubuntu base-image digest and the exact
-`pace` `master` commit before building. It runs on pull requests (build and
-smoke test only), on pushes to `master`, and once daily. Each `master` build is
-pushed under its `<sha>` tag and then moves the `latest` tag to it. Consumers
-use `latest`, so new images reach all CI runs automatically. The image labels
-record both revisions.
+`publish.yml` runs in four stages:
 
-Pull requests build and smoke-test the image without pushing it.
+1. **resolve** pins an immutable Ubuntu base-image digest and the exact `pace`
+   `master` commit.
+2. **build** builds the toolchain image with no seed, smoke-tests it, and pushes
+   it as `<sha>-base`. Pull requests stop here.
+3. **warm** runs the `pace` cache warm-up inside that base image, then pushes the
+   resulting store as `ghcr.io/lastrada-software/cpp-ci-seed-pace:<sha>`.
+4. **publish** bakes the seed into the final image, smoke-tests it, pushes
+   `<sha>`, and moves `latest` to it on `master`.
 
-The current image is the toolchain foundation. The seed cache directory is
-created empty. **The seed warmer is not yet implemented in this repository**, so
-no consumer currently gets a seed. The design is below.
+If the warm-up fails, `publish` does not run, and `latest` stays on the previous
+image with its previous seed. Consumers pick up each new image automatically, so
+no changes are needed in their repositories.
 
-## Seed warmer design (proposed)
+## Seed warmer
 
-**Status:** proposal, reviewed, not implemented.
+The warmer builds each configured project's Linux presets once, with the compile
+cache enabled, into a single-file `pace-kv` store. The store is baked into the
+image under `/opt/pace/seed-cache/<project>/`, and each consumer copies only its
+own project's directory.
 
-### Goal
+**Status:** `pace` is the first project onboarded. The other three are not yet
+onboarded. The blockers are tracked upstream:
 
-Every CI job on every Linux runner in the organization starts with a compile
-cache already populated for the presets it builds, so compile results are not
-recomputed per job.
+- `Lightweight`: a test compile definition embeds an absolute build-tree path,
+  so cache entries are not shared across checkouts. See
+  [Lightweight#693](https://github.com/LASTRADA-Software/Lightweight/issues/693).
+- `formula-cpp`: no cache integration. See
+  [formula-cpp#36](https://github.com/LASTRADA-Software/formula-cpp/issues/36).
+- `morph`: not yet measured.
 
-### Scope
+### Manifest
 
-The manifest is [`warm-targets.yml`](warm-targets.yml): 27 (project, preset)
-pairs.
+[`warm-targets.json`](warm-targets.json) lists the presets to warm. It contains
+`pace`'s nine Linux presets: gcc debug/release, clang debug/release, the two gate
+presets, clang tracy, clang asan-ubsan, and clang tsan. Coverage presets are
+excluded, because `pace-cc` binds coverage objects to the checkout root and they
+never hit from another checkout. Windows presets are out of scope.
 
-| Project | Presets |
-|---|---|
-| `pace` | 9: gcc debug/release/gate, clang debug/release/gate/tracy, clang asan-ubsan/tsan |
-| `morph` | 8: gcc debug/release, clang debug/release/`linux-everything`, clang asan/tsan/ubsan |
-| `Lightweight` | 6: gcc debug/release, clang debug/release, clang asan-ubsan/tsan |
-| `formula-cpp` | 4: gcc release, clang debug/release/ubsan |
+Presets listed in `test_presets` also run `ctest`, which for `pace` means
+`gcc-release` and `clang-release`.
 
-Excluded:
+### What the warm-up does
 
-- **Windows presets** (`cl-*`, `clangcl-*`, `windows-everything`): the image is
-  Linux-only.
-- **Coverage presets:** `pace-cc` binds coverage-map objects to the checkout
-  root, so they never hit from another checkout. `pace` and `morph` also refuse
-  to configure coverage with a compiler launcher.
+[`scripts/warm-project.sh`](scripts/warm-project.sh) runs inside the base image:
 
-Each pair is its own cache namespace. Namespaces include the toolchain ABI,
-architecture, project, and preset, as [the usage guide](docs/usage.md#seed-cache-lifecycle)
-requires.
+- starts a local `pace-kv` on a single-file store, with an on-disk cap of
+  `WARM_MAX_DISK` (default `4g`);
+- for each preset, configures with `-DUSE_COMPILER_CACHE=ON` and builds it, and
+  for test presets runs `ctest`;
+- fails fast: a failing configure or build stops the warm-up, so no partial seed
+  is produced;
+- stops `pace-kv` with SIGTERM, so batched writes are flushed;
+- reopens the store once to confirm that it opens.
 
-### Flow
-
-The warm-up is a job inside `publish.yml`, not a separate workflow. The seed
-must be produced by the same `pace-cc`, `pace-kv`, and compilers it is baked
-beside: cache keys include the compiler banner, and `pace-kv` refuses stores
-written by a different `pace` build. `publish.yml` re-resolves `pace` `master`
-on every run, so a separately scheduled warmer could seed an image with a store
-it cannot read.
-
-1. **Build base.** Build `cpp-ci:<sha>-base` (toolchain only) and push it.
-2. **Warm.** For each project, run one job inside the base image. The job
-   checks out the project's default branch at a recorded commit and builds
-   each of its presets with `-DUSE_COMPILER_CACHE=ON`, using a local
-   `pace-kv` daemon as the only writer. Release presets also run `ctest`.
-   Only `master` or the schedule writes; pull requests never do.
-3. **Gate.** A project's store is kept only if every one of its presets builds
-   and passes. The store is closed with a graceful stop, which flushes pending
-   writes, before it is copied.
-4. **Validate.** Each store is opened with the new `pace-kv` binary. A store
-   that fails to open is dropped, and the image is built without a seed for
-   that project.
-5. **Bake and tag.** Copy the validated stores into the image under
-   `/opt/pace/seed-cache/<project>/`, push the image as `cpp-ci:<sha>`, and move
-   `latest` to it.
-6. **Consume.** A job copies only its own project's store to a writable
-   location before starting its local `pace-kv`, as
-   [the usage guide](docs/usage.md#seed-cache-lifecycle) describes. A store that
-   fails to open falls back to an empty one.
+The project checkout sits at the same path inside the container as on the host.
 
 ### Decisions
 
-- **Store layout:** one store per project. `pace-kv` cannot merge stores and
-  has no key enumeration or export, so each writer job owns one store. Stores
-  are started with a file path, not a directory, so the shard count cannot
-  change between writer and reader.
-- **Coverage:** excluded (see Scope).
-- **Sanitizers and debug presets:** warmed on every run. Sanitizer builds are
-  the most expensive, so they are where a seed saves the most time.
-- **Tests:** release presets run `ctest`. Sanitizer and debug presets only
-  build, because running their tests roughly doubles job time without changing
-  what the cache holds.
-- **Size cap:** each project's warm-up runs `pace-kv` with a disk cap of
-  2 GiB, and the cap is revisited after the first measured run. The cap evicts
-  least-recently-used entries, and it counts compressed size. The store file
-  keeps free pages above the cap, so the file size is what gets measured.
-  Measured locally: `morph` `linux-everything` objects total 1.7 GiB, and
-  `gcc-debug` 8.6 GiB, because debug builds carry full `-g` line tables.
-  Debug presets dominate the size.
-- **Credentials:** the warm-up uses a local `pace-kv`, so it needs no
-  `PACE_TOKEN`. All four repositories are public, so no checkout token is
-  needed. The warm job gets `GITHUB_TOKEN` with `contents: read` and
-  `packages: write` only. A shared remote daemon, if one is added later, would
-  get `PACE_KV_TOKEN` in a GitHub Environment limited to `master`, never on
-  pull request events.
+- **Gate on build, not on tests.** A build failure fails the warm-up. `ctest`
+  failures are reported as warnings. The container runs as root with no services,
+  so a few of `pace`'s environment-dependent tests fail (a permission check, and
+  daemon start-up). The seed depends on what compiled, not on which tests passed.
+  This departs from the earlier design, which gated on tests.
+- **Sanitizer and debug presets build only**, without running their tests. That
+  keeps the warm-up time down, and it does not change what the cache holds.
+- **One store per project.** `pace-kv` cannot merge stores, so each project's
+  store is written by one job.
+- **Warm-up runs inside `publish.yml`,** not on a separate schedule. The seed is
+  produced by the same `pace-cc`, `pace-kv`, and compilers it is baked beside.
+  Cache keys include the compiler banner, and `pace-kv` refuses stores written by
+  a different `pace` build.
+- **Credentials.** The warm-up uses a local `pace-kv`, so it needs no
+  `PACE_TOKEN`. `pace` is a public repository, so no checkout token is needed.
+  The warm job has `contents: read` and `packages: write` only.
+- **Runner.** The warm-up runs on `ubuntu-24.04` unless the `WARM_RUNNER`
+  repository or organization variable selects another runner. A hosted runner
+  may not have the time or disk for a full warm-up, so a larger runner may be
+  needed.
+
+### Measurements
+
+These come from building on the same machine, against a local `pace-kv` store.
+
+| Build | Compiles | Hits | Notes |
+|---|---|---|---|
+| `pace` `gcc-release`, cold, checkout A | 1,173 | 0 | 541 s build |
+| `pace` `gcc-release`, checkout B, same store | 1,173 | 1,149 (98.0%) | 52 s build; 23 misses not investigated |
+| `Lightweight` `gcc-release`, checkout B, same store | 243 | 104 (43%) | cause: test compile definition with absolute path |
+| `Lightweight` after that define is made relative | 228 | 226 (99.1%) | counterfactual |
+| `formula-cpp` `gcc-release`, checkout B, launchers set by hand | 415 | 339 (81.7%) | no cache integration; prefix-map rules not applied |
+
+The store size for `pace` has not been measured yet, so the `4g` cap is a
+placeholder. It should be set from the first real run.
 
 ### Open risks
 
-- **Path portability fails for Lightweight `gcc-release`.** Measured with the
-  image's `pace-kv` and `pace-cc`, cold build then a build from a second
-  checkout at a different path against the same store:
-
-  | Build | Compiles | Hits | Store size |
-  |---|---|---|---|
-  | Cold, checkout A | 243 | 0 | 317 MB |
-  | Warm, checkout B (different path) | 243 | 104 (43%) | 545 MB |
-
-  **Cause:** `LightweightTest` defines
-  `LIGHTWEIGHT_TEST_POST_MIGRATE_PLUGIN="$<TARGET_FILE:post_migrate_plugin>"`
-  (`Lightweight/src/tests/CMakeLists.txt:211`). That value is an absolute
-  build-tree path, so every test compile's arguments differ between checkouts.
-  `pace-cc` does not relativize `-D` values: `PathPortionOf` in
-  `src/apps/pace-cc/CacheKey.cpp` only tokenizes the flags in the path table,
-  and `-D` is not one of them. The 138 test objects that carry the define are
-  exactly the misses. The 12 test objects without it hit, and so did all
-  library and tool objects.
-
-  **Counterfactual:** with the define set to the relative name
-  `post_migrate_plugin`, a build of `LightweightTest` in a second checkout hit
-  226 of 228 compiles (99.1%). Before the change it hit 43%.
-
-  Until this is fixed, a seed built in one path helps only jobs that build at
-  the same path, so warm-up and consumer jobs must use the same checkout layout.
-  No other local project (`pace`, `morph`) matched this pattern. `formula-cpp`
-  has not been checked for it.
-
+- **The 23 `pace` misses are unexplained.** A verbose run would show which
+  translation units miss.
+- **Warm-up time on hosted runners is unknown.** Nine presets, two of them
+  sanitizer builds, may exceed the time or disk of a standard runner.
 - **Compiler banner drift.** If the `apt.llvm.org` clang 22 point release changes
   between daily builds, the cache is re-keyed every day. The base build pins the
-  compiler version, so this can be detected by comparing banners between runs.
-- **Warm-up time and size are unmeasured.** Per-preset times and compressed
-  store sizes on GitHub runners are unknown until the first run.
-- **Unverified for two projects.** The coverage guard was verified only in
-  `pace` and `morph`. `Lightweight` and `formula-cpp` need the same check before
-  their presets are trusted.
-- **Seed size in every pull.** All project stores are baked into one image, so
-  every job pulls all of them. Splitting them into per-project images is an
-  alternative if the pull cost is too high.
+  compiler version, so the banner should be compared between runs.
+- **Seed size in every pull.** The seed is part of the image, so every job that
+  pulls the image also pulls the seed.

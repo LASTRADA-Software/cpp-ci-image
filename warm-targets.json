@@ -1,0 +1,29 @@
+{
+  "_comment": "Presets warmed into the compile-cache seed. Only pace is onboarded; see README. Windows presets are out of scope (Linux-only image). Coverage presets are excluded: pace-cc binds coverage objects to the checkout root.",
+  "projects": [
+    {
+      "name": "pace",
+      "repo": "LASTRADA-Software/pace",
+      "presets": [
+        "gcc-debug",
+        "gcc-release",
+        "gate-gcc-release",
+        "clang-debug",
+        "clang-release",
+        "gate-clang-debug",
+        "clang-tracy",
+        "clang-asan-ubsan",
+        "clang-tsan"
+      ],
+      "test_presets": [
+        "gcc-release",
+        "clang-release"
+      ]
+    }
+  ],
+  "not_onboarded": {
+    "Lightweight": "Test define embeds an absolute build-tree path (LightweightTest). Tracked in LASTRADA-Software/Lightweight#693.",
+    "formula-cpp": "No pace-cc integration; USE_COMPILER_CACHE is ignored. Tracked in LASTRADA-Software/formula-cpp#36.",
+    "morph": "Not yet measured."
+  }
+}

@@ -15,32 +15,32 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-jobs:
-  image:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/cpp-ci
-    steps:
-      - uses: actions/checkout@v4
+env:
+  IMAGE: ghcr.io/lastrada-software/cpp-ci
 
+jobs:
+  # Resolve immutable inputs. Pull requests build and smoke-test only; every
+  # other event also warms the caches and publishes.
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_image: ${{ steps.inputs.outputs.base_image }}
+      pace_ref: ${{ steps.inputs.outputs.pace_ref }}
+      publish: ${{ steps.inputs.outputs.publish }}
+    steps:
       - uses: docker/setup-buildx-action@v3
 
-      - name: Resolve immutable build inputs
-        id: inputs
+      - id: inputs
         shell: bash
         run: |
           set -euo pipefail
           base_digest="$(docker buildx imagetools inspect ubuntu:24.04 --format '{{.Digest}}')"
-          pace_ref="$(git ls-remote https://github.com/LASTRADA-Software/pace.git refs/heads/master | awk '{print $1}')"
           test -n "$base_digest"
+          pace_ref="$(git ls-remote https://github.com/LASTRADA-Software/pace.git refs/heads/master | awk '{print $1}')"
           test -n "$pace_ref"
           {
             echo "base_image=ubuntu:24.04@${base_digest}"
             echo "pace_ref=${pace_ref}"
-            # Pull requests validate the build only; nothing is pushed.
             if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
               echo "publish=false"
             else
@@ -50,28 +50,41 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
 
-      # Build into the local Docker daemon so the smoke test runs against the
-      # exact bits that would be pushed.
+  # Build the toolchain image without any seed, smoke-test it, and push it under
+  # its <sha>-base tag so the warm-up can run in exactly this image.
+  build:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
+          build-contexts: |
+            pace-seed=./seed/none
           build-args: |
-            BASE_IMAGE=${{ steps.inputs.outputs.base_image }}
-            PACE_REF=${{ steps.inputs.outputs.pace_ref }}
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
+            BASE_IMAGE=${{ needs.resolve.outputs.base_image }}
+            PACE_REF=${{ needs.resolve.outputs.pace_ref }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-base
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-            org.lastrada.pace.ref=${{ steps.inputs.outputs.pace_ref }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            org.lastrada.pace.ref=${{ needs.resolve.outputs.pace_ref }}
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
 
       - name: Smoke test toolchain
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" bash -euo pipefail -c '
+          docker run --rm "${IMAGE}:${GITHUB_SHA}-base" bash -euo pipefail -c '
             for tool in gcc g++ gcc-14 g++-14 clang clang++ clang-tidy \
                         clang-22 clang++-22 clang-tidy-22 cmake ninja \
                         pkg-config pace-cc pace-kv; do
@@ -81,37 +94,157 @@ jobs:
             clang++ --version | head -n1
             cmake --version | head -n1
             ninja --version
-            # Shared-library resolution is the failure mode most likely to
-            # slip past a build-only check.
             for bin in /opt/pace/bin/pace-cc /opt/pace/bin/pace-kv; do
               if ldd "$bin" | grep -q "not found"; then
                 echo "unresolved libraries in $bin"; ldd "$bin"; exit 1
               fi
             done
             test -d "$PACE_CACHE_SEED_DIR"
-            # Compile and link a trivial C++ program with each compiler.
             tmp="$(mktemp -d)"
             printf "#include <cstdio>\nint main(){std::puts(\"ok\");}\n" > "$tmp/t.cpp"
             g++ -std=c++23 -o "$tmp/gcc-t" "$tmp/t.cpp"
             clang++ -std=c++23 -stdlib=libstdc++ -o "$tmp/clang-t" "$tmp/t.cpp"
             "$tmp/gcc-t" && "$tmp/clang-t"
           '
-        env:
-          IMAGE: ${{ env.IMAGE }}
 
       - uses: docker/login-action@v3
-        if: steps.inputs.outputs.publish == 'true'
+        if: needs.resolve.outputs.publish == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Every smoke-tested build on master gets an immutable <sha> tag, and
-      # the moving `latest` tag is advanced to it. Consumers reference `latest`,
-      # so a new master build reaches all CI runs on their next job start.
-      # Rolling back means re-pointing `latest` at an earlier <sha> tag.
+      - name: Push base image
+        if: needs.resolve.outputs.publish == 'true'
+        shell: bash
+        run: docker push "${IMAGE}:${GITHUB_SHA}-base"
+
+  # Warm the compile cache for every configured project, in the base image.
+  # Any failing preset fails this job, so no partial seed is ever published.
+  warm:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ${{ vars.WARM_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cpp-ci-image
+
+      # The project checkout sits at the same path inside the container as on
+      # the host, so the cache keys see the same layout as the warm-up.
+      - uses: actions/checkout@v4
+        with:
+          repository: LASTRADA-Software/pace
+          ref: ${{ needs.resolve.outputs.pace_ref }}
+          path: pace-src
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull base image
+        shell: bash
+        run: docker pull "${IMAGE}:${GITHUB_SHA}-base"
+
+      - name: Warm pace caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/warm"
+          mkdir -p "$work/store"
+          src="$GITHUB_WORKSPACE/pace-src"
+          presets="$(jq -r '.projects[] | select(.name=="pace") | .presets | join(" ")' cpp-ci-image/warm-targets.json)"
+          tests="$(jq -r '.projects[] | select(.name=="pace") | .test_presets | join(" ")' cpp-ci-image/warm-targets.json)"
+          docker run --rm \
+            -v "$src:$src" \
+            -v "$work:/warm" \
+            -v "$GITHUB_WORKSPACE/cpp-ci-image/scripts:/scripts:ro" \
+            -e WORKSPACE="$src" \
+            -e STORE=/warm/store/cache.cow \
+            -e PRESETS="$presets" \
+            -e TEST_PRESETS="$tests" \
+            -e WARM_MAX_DISK="${WARM_MAX_DISK:-4g}" \
+            -w "$src" \
+            "${IMAGE}:${GITHUB_SHA}-base" \
+            bash /scripts/warm-project.sh
+          ls -l "$work/store"
+
+      - name: Build and push pace seed image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/seed-ctx"
+          mkdir -p "$ctx"
+          cp "$RUNNER_TEMP/warm/store/cache.cow" "$ctx/cache.cow"
+          printf 'FROM scratch\nCOPY cache.cow /cache.cow\n' > "$ctx/Dockerfile"
+          seed="ghcr.io/lastrada-software/cpp-ci-seed-pace"
+          docker build -t "${seed}:${GITHUB_SHA}" "$ctx"
+          docker push "${seed}:${GITHUB_SHA}"
+
+  # Bake the seed into the final image, smoke-test it, and move `latest`.
+  # Runs only after a successful warm-up, so a failed warm-up keeps the previous
+  # image, with its previous seed, as `latest`.
+  publish:
+    needs: [resolve, warm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          build-contexts: |
+            pace-seed=docker-image://ghcr.io/lastrada-software/cpp-ci-seed-pace:${{ github.sha }}
+          build-args: |
+            BASE_IMAGE=${{ needs.resolve.outputs.base_image }}
+            PACE_REF=${{ needs.resolve.outputs.pace_ref }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.lastrada.pace.ref=${{ needs.resolve.outputs.pace_ref }}
+          cache-from: type=gha,scope=final
+          cache-to: type=gha,mode=max,scope=final
+
+      - name: Smoke test seeded image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" bash -euo pipefail -c '
+            test -f /opt/pace/seed-cache/pace/cache.cow
+            # The seed must open with this image pace-kv. Open a copy, so the
+            # shipped store is not modified.
+            cp /opt/pace/seed-cache/pace/cache.cow /tmp/seed-check.cow
+            pace-kv --bind=127.0.0.1 --port=6675 --storage=/tmp/seed-check.cow \
+                --storage-shards=1 --log-level=warn &
+            KV=$!
+            for _ in $(seq 100); do
+              if (exec 3<>/dev/tcp/127.0.0.1/6675) 2>/dev/null; then break; fi
+              sleep 0.2
+            done
+            kill -0 "$KV"
+            kill -TERM "$KV"; wait "$KV" || true
+          '
+
       - name: Push image
-        if: steps.inputs.outputs.publish == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -120,5 +253,3 @@ jobs:
             docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:latest"
             docker push "${IMAGE}:latest"
           fi
-        env:
-          IMAGE: ${{ env.IMAGE }}

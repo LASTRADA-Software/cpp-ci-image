@@ -108,27 +108,31 @@ deployment rather than assuming that a daemon-only `--tls` switch is enough.
 
 ## Seed-cache lifecycle
 
-The image exposes `/opt/pace/seed-cache` through `PACE_CACHE_SEED_DIR`. This
-directory is read-only image content. A CI job must copy it to a writable
-location before starting a local daemon:
+The image exposes `/opt/pace/seed-cache` through `PACE_CACHE_SEED_DIR`. Each
+warmed project has its own read-only subdirectory there. Today only `pace` is
+warmed, so its store is `$PACE_CACHE_SEED_DIR/pace/cache.cow`. A CI job copies
+its own project's store to a writable location before starting a local daemon:
 
 ```sh
-cp -a "$PACE_CACHE_SEED_DIR/." "$RUNNER_TEMP/pace-seed"
-pace-kv --storage="$RUNNER_TEMP/pace-seed/cache.cow" &
+mkdir -p "$RUNNER_TEMP/pace-seed"
+cp -a "$PACE_CACHE_SEED_DIR/pace/." "$RUNNER_TEMP/pace-seed/"
+pace-kv --storage="$RUNNER_TEMP/pace-seed/cache.cow" --storage-shards=1 &
 export PACE_ADDR=127.0.0.1:6674
 ```
 
-The planned daily warmer will build the selected Linux release presets for all
-four repositories and create the next seed only after every selected build and
-test passes. It is not yet implemented in this repository, so the seed directory
-is currently empty. Seed namespaces must include the toolchain ABI, architecture, project,
-and CMake preset. Keep the seed under a measured size budget: a larger image is
-useful only when its extra pull and copy time is lower than the compile time it
-saves.
+The store must be opened as a file (`--storage-shards=1`), not as a directory.
+A store that does not open should be treated as an empty one, so the build
+falls back to compiling.
+
+The warm-up runs before every image is published: it builds the presets listed
+in [`warm-targets.json`](../warm-targets.json) with the cache enabled, and it
+publishes the store only if every build succeeds. Seeds are keyed by toolchain
+ABI, architecture, project, and CMake preset. A seed is only useful when its
+extra pull and copy time is lower than the compile time it saves.
 
 ## Migration order
 
-1. Migrate and measure `pace` Linux release builds.
+1. Migrate and measure `pace` Linux release builds. `pace` is the first warmed project.
 2. Migrate `morph` Linux release builds.
 3. Migrate `Lightweight` Linux release builds.
 4. Migrate `formula-cpp` Linux release builds.
