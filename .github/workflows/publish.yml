@@ -34,7 +34,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base_digest="$(docker buildx imagetools inspect ubuntu:24.04 --format '{{.Digest}}')"
+          # Parse the plain-text output: the --format templates differ between buildx versions.
+          base_digest="$(docker buildx imagetools inspect ubuntu:24.04 | awk '/^Digest:/{print $2; exit}')"
           test -n "$base_digest"
           pace_ref="$(git ls-remote https://github.com/LASTRADA-Software/pace.git refs/heads/master | awk '{print $1}')"
           test -n "$pace_ref"
