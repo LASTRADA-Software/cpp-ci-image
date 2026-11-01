@@ -19,24 +19,27 @@ authenticated `pace-kv` alone does not distinguish cache readers from writers.
 `publish.yml` runs in four stages:
 
 1. **resolve** pins an immutable Ubuntu base-image digest and the exact `pace`
-   `master` commit.
+   `master` commit, and reads the warm-up groups from `warm-targets.json`.
 2. **build** builds the toolchain image with no seed, smoke-tests it, and pushes
    it as `<sha>-base`. Pull requests stop here.
-3. **warm** runs the `pace` cache warm-up inside that base image, then pushes the
-   resulting store as `ghcr.io/lastrada-software/cpp-ci-seed-pace:<sha>`.
-4. **publish** bakes the seed into the final image, smoke-tests it, pushes
-   `<sha>`, and moves `latest` to it on `master`.
+3. **warm** runs one job per group in parallel, inside the base image. Each job
+   starts from the previously published seed for its group, so only translation
+   units whose inputs changed are recompiled. Each job pushes its result as a
+   candidate seed image, `cpp-ci-seed-pace-<group>:<sha>`.
+4. **publish** assembles the candidate seeds into the final image, smoke-tests
+   it, and pushes `<sha>`. On `master` it also moves `latest` and each group's
+   seed to the new candidates.
 
-If the warm-up fails, `publish` does not run, and `latest` stays on the previous
-image with its previous seed. Consumers pick up each new image automatically, so
-no changes are needed in their repositories.
+If any warm-up group fails, `publish` does not run, and `latest` stays on the
+previous image with its previous seeds. Consumers pick up each new image
+automatically, so no changes are needed in their repositories.
 
 ## Seed warmer
 
-The warmer builds each configured project's Linux presets once, with the compile
-cache enabled, into a single-file `pace-kv` store. The store is baked into the
-image under `/opt/pace/seed-cache/<project>/`, and each consumer copies only its
-own project's directory.
+The warmer builds each configured project's presets with the compile cache
+enabled, into single-file `pace-kv` stores. Each store is one group of presets,
+and the stores are baked into the image as `/opt/pace/seed-cache/<project>/<group>.cow`.
+A consumer copies the store for the group it builds.
 
 **Status:** `pace` is the first project onboarded. The other three are not yet
 onboarded. The blockers are tracked upstream:
@@ -50,48 +53,60 @@ onboarded. The blockers are tracked upstream:
 
 ### Manifest
 
-[`warm-targets.json`](warm-targets.json) lists the presets to warm. It contains
-`pace`'s nine Linux presets: gcc debug/release, clang debug/release, the two gate
-presets, clang tracy, clang asan-ubsan, and clang tsan. Coverage presets are
-excluded, because `pace-cc` binds coverage objects to the checkout root and they
-never hit from another checkout. Windows presets are out of scope.
+[`warm-targets.json`](warm-targets.json) lists the groups. `pace` has three:
 
-Presets listed in `test_presets` also run `ctest`, which for `pace` means
-`gcc-release` and `clang-release`.
+| Group | Presets | Tests run |
+|---|---|---|
+| `gcc` | gcc debug, gcc release, gate-gcc-release | gcc-release |
+| `clang` | clang debug, clang release, gate-clang-debug, clang tracy | clang-release |
+| `sanitizers` | clang asan-ubsan, clang tsan | none |
 
-### What the warm-up does
+Coverage presets are excluded, because `pace-cc` binds coverage objects to the
+checkout root and they never hit from another checkout. Windows presets are out
+of scope.
+
+### What a group job does
 
 [`scripts/warm-project.sh`](scripts/warm-project.sh) runs inside the base image:
 
 - starts a local `pace-kv` on a single-file store, with an on-disk cap of
-  `WARM_MAX_DISK` (default `4g`);
+  `WARM_MAX_DISK` (default `4g`), which evicts least-recently-used entries;
+- if the previous seed exists, starts from a copy of it. A store the new
+  `pace-kv` refuses (for example after a storage format change) is discarded,
+  and the group starts empty;
 - for each preset, configures with `-DUSE_COMPILER_CACHE=ON` and builds it, and
   for test presets runs `ctest`;
-- fails fast: a failing configure or build stops the warm-up, so no partial seed
-  is produced;
-- stops `pace-kv` with SIGTERM, so batched writes are flushed;
-- reopens the store once to confirm that it opens.
+- fails fast: a failing configure or build stops the group, and a configure that
+  disables the cache fails it too;
+- fails if `pace-cc` records no statistics, so an uncached warm-up is never
+  published;
+- stops `pace-kv` with SIGTERM, so batched writes are flushed, and reopens the
+  store once.
 
 The project checkout sits at the same path inside the container as on the host.
 
 ### Decisions
 
+- **Parallel groups, one store each.** `pace-kv` cannot merge stores, so each
+  group job writes its own store. Groups run in parallel to cut wall-clock time.
+- **Incremental reuse.** Each group starts from the previously published seed,
+  so only changed translation units are recompiled. The disk cap bounds the
+  reused store.
+- **Promotion on `master` only.** The candidate seeds become the starting point
+  for the next warm-up only when the image that contains them is published.
+  Branch runs never move `latest`, so their seeds cannot become a starting point.
 - **Gate on build, not on tests.** A build failure fails the warm-up. `ctest`
   failures are reported as warnings. The container runs as root with no services,
   so a few of `pace`'s environment-dependent tests fail (a permission check, and
   daemon start-up). The seed depends on what compiled, not on which tests passed.
   This departs from the earlier design, which gated on tests.
-- **Sanitizer and debug presets build only**, without running their tests. That
-  keeps the warm-up time down, and it does not change what the cache holds.
-- **One store per project.** `pace-kv` cannot merge stores, so each project's
-  store is written by one job.
+- **Sanitizer and debug presets build only**, without running their tests.
 - **Warm-up runs inside `publish.yml`,** not on a separate schedule. The seed is
   produced by the same `pace-cc`, `pace-kv`, and compilers it is baked beside.
-  Cache keys include the compiler banner, and `pace-kv` refuses stores written by
-  a different `pace` build.
+  Cache keys include the compiler banner, and `pace-kv` refuses stores written
+  with a different storage format.
 - **Credentials.** The warm-up uses a local `pace-kv`, so it needs no
   `PACE_TOKEN`. `pace` is a public repository, so no checkout token is needed.
-  The warm job has `contents: read` and `packages: write` only.
 - **Runner.** The warm-up runs on `ubuntu-24.04` unless the `WARM_RUNNER`
   repository or organization variable selects another runner. A hosted runner
   may not have the time or disk for a full warm-up, so a larger runner may be
@@ -105,6 +120,7 @@ These come from building on the same machine, against a local `pace-kv` store.
 |---|---|---|---|
 | `pace` `gcc-release`, cold, checkout A | 1,173 | 0 | 541 s build |
 | `pace` `gcc-release`, checkout B, same store | 1,173 | 1,149 (98.0%) | 52 s build; 23 misses not investigated |
+| `pace` `gcc-release`, starting from the previous seed | 1,173 | 1,172 (100%) | incremental reuse |
 | `Lightweight` `gcc-release`, checkout B, same store | 243 | 104 (43%) | cause: test compile definition with absolute path |
 | `Lightweight` after that define is made relative | 228 | 226 (99.1%) | counterfactual |
 | `formula-cpp` `gcc-release`, checkout B, launchers set by hand | 415 | 339 (81.7%) | no cache integration; prefix-map rules not applied |
@@ -117,9 +133,15 @@ placeholder. It should be set from the first real run.
 - **The 23 `pace` misses are unexplained.** A verbose run would show which
   translation units miss.
 - **Warm-up time on hosted runners is unknown.** Nine presets, two of them
-  sanitizer builds, may exceed the time or disk of a standard runner.
+  sanitizer builds, may exceed the time or disk of a standard runner. The groups
+  shorten the wall-clock time, not the total work.
+- **A configure can fail intermittently on the cache exchange.** Once, a configure
+  reported `fetch exchange failed` and disabled the cache. It did not recur in
+  the verbose re-run. The script now fails the group when the cache is disabled,
+  so this cannot publish an uncached seed.
 - **Compiler banner drift.** If the `apt.llvm.org` clang 22 point release changes
   between daily builds, the cache is re-keyed every day. The base build pins the
   compiler version, so the banner should be compared between runs.
-- **Seed size in every pull.** The seed is part of the image, so every job that
-  pulls the image also pulls the seed.
+- **Seed size in every pull.** The seeds are part of the image, so every job that
+  pulls the image also pulls them. Reuse keeps the stores bounded by the disk cap,
+  not by the number of runs.

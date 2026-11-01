@@ -85,11 +85,12 @@ LABEL org.opencontainers.image.source="https://github.com/LASTRADA-Software/cpp-
 
 COPY --from=builder /opt/pace/bin/pace-cc /opt/pace/bin/pace-kv /opt/pace/bin/
 
-# Compile-cache seed for the project `pace`, supplied as the named build context
-# `pace-seed`. Builds without a seed pass an empty directory (seed/none), which
-# leaves the seed directory empty. Each project gets its own subdirectory, so a
-# job copies only its own store. See README: "Seed warmer design".
-COPY --from=pace-seed / /opt/pace/seed-cache/pace/
+# Compile-cache seeds, supplied as the named build context `pace-seed`: a
+# directory holding one store per warmed group, at pace/<group>.cow. Builds
+# without a seed pass seed/none, which leaves the seed directories empty. Each
+# project has its own subdirectory, so a job copies only the store it needs.
+# See README: "Seed warmer".
+COPY --from=pace-seed / /opt/pace/seed-cache/
 
 ENV PATH="/opt/pace/bin:${PATH}" \
     PACE_CACHE_SEED_DIR="/opt/pace/seed-cache"

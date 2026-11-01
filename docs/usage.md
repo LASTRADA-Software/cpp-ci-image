@@ -109,13 +109,15 @@ deployment rather than assuming that a daemon-only `--tls` switch is enough.
 ## Seed-cache lifecycle
 
 The image exposes `/opt/pace/seed-cache` through `PACE_CACHE_SEED_DIR`. Each
-warmed project has its own read-only subdirectory there. Today only `pace` is
-warmed, so its store is `$PACE_CACHE_SEED_DIR/pace/cache.cow`. A CI job copies
-its own project's store to a writable location before starting a local daemon:
+warmed project has its own read-only subdirectory, and each group of presets has
+its own store file in it. For `pace` the groups are `gcc`, `clang`, and
+`sanitizers`, so the stores are `$PACE_CACHE_SEED_DIR/pace/gcc.cow`,
+`.../clang.cow`, and `.../sanitizers.cow`. A job copies the store for the group
+it builds to a writable location before starting a local daemon:
 
 ```sh
 mkdir -p "$RUNNER_TEMP/pace-seed"
-cp -a "$PACE_CACHE_SEED_DIR/pace/." "$RUNNER_TEMP/pace-seed/"
+cp -a "$PACE_CACHE_SEED_DIR/pace/gcc.cow" "$RUNNER_TEMP/pace-seed/cache.cow"
 pace-kv --storage="$RUNNER_TEMP/pace-seed/cache.cow" --storage-shards=1 &
 export PACE_ADDR=127.0.0.1:6674
 ```
@@ -124,11 +126,11 @@ The store must be opened as a file (`--storage-shards=1`), not as a directory.
 A store that does not open should be treated as an empty one, so the build
 falls back to compiling.
 
-The warm-up runs before every image is published: it builds the presets listed
-in [`warm-targets.json`](../warm-targets.json) with the cache enabled, and it
-publishes the store only if every build succeeds. Seeds are keyed by toolchain
-ABI, architecture, project, and CMake preset. A seed is only useful when its
-extra pull and copy time is lower than the compile time it saves.
+Warm-ups run on every publish. Each group starts from the store published by the
+previous `master` build, so the stores accumulate only what the presets have
+actually compiled. The groups and presets are listed in
+[`warm-targets.json`](../warm-targets.json). Seeds are keyed by toolchain ABI,
+architecture, project, and CMake preset.
 
 ## Migration order
 

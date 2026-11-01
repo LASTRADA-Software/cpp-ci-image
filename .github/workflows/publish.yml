@@ -17,17 +17,21 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/lastrada-software/cpp-ci
+  SEED_IMAGE_PREFIX: ghcr.io/lastrada-software/cpp-ci-seed-pace
 
 jobs:
-  # Resolve immutable inputs. Pull requests build and smoke-test only; every
-  # other event also warms the caches and publishes.
+  # Resolve immutable inputs and the warm-up groups. Pull requests build and
+  # smoke-test only; every other event also warms the caches and publishes.
   resolve:
     runs-on: ubuntu-24.04
     outputs:
       base_image: ${{ steps.inputs.outputs.base_image }}
       pace_ref: ${{ steps.inputs.outputs.pace_ref }}
       publish: ${{ steps.inputs.outputs.publish }}
+      groups: ${{ steps.inputs.outputs.groups }}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: docker/setup-buildx-action@v3
 
       - id: inputs
@@ -45,12 +49,13 @@ jobs:
             echo "attempt $attempt failed:"; printf '%s\n' "$out"; sleep 15
           done
           test -n "$base_digest"
-          test -n "$base_digest"
           pace_ref="$(git ls-remote https://github.com/LASTRADA-Software/pace.git refs/heads/master | awk '{print $1}')"
           test -n "$pace_ref"
+          groups="$(jq -c '[.projects[] | select(.name=="pace") | .groups[].name]' warm-targets.json)"
           {
             echo "base_image=ubuntu:24.04@${base_digest}"
             echo "pace_ref=${pace_ref}"
+            echo "groups=${groups}"
             if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
               echo "publish=false"
             else
@@ -129,13 +134,19 @@ jobs:
         shell: bash
         run: docker push "${IMAGE}:${GITHUB_SHA}-base"
 
-  # Warm the compile cache for every configured project, in the base image.
-  # Any failing preset fails this job, so no partial seed is ever published.
+  # Warm one group of pace's presets. The groups run in parallel, each into its own
+  # store. Each job starts from the previous published seed for its group, so only
+  # translation units whose inputs changed are recompiled. Any failing build fails
+  # its group, and no candidate seed is pushed for it.
   warm:
     needs: [resolve, build]
     if: needs.resolve.outputs.publish == 'true'
     runs-on: ${{ vars.WARM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 330
+    strategy:
+      fail-fast: true
+      matrix:
+        group: ${{ fromJSON(needs.resolve.outputs.groups) }}
     permissions:
       contents: read
       packages: write
@@ -144,8 +155,8 @@ jobs:
         with:
           path: cpp-ci-image
 
-      # The project checkout sits at the same path inside the container as on
-      # the host, so the cache keys see the same layout as the warm-up.
+      # The project checkout sits at the same path inside the container as on the
+      # host, so the cache keys see the same layout as the warm-up.
       - uses: actions/checkout@v4
         with:
           repository: LASTRADA-Software/pace
@@ -162,44 +173,77 @@ jobs:
         shell: bash
         run: docker pull "${IMAGE}:${GITHUB_SHA}-base"
 
-      - name: Warm pace caches
+      - name: Fetch previous seed for this group
+        id: previous
         shell: bash
+        env:
+          GROUP: ${{ matrix.group }}
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/warm"
-          mkdir -p "$work/store"
+          mkdir -p "$work"
+          prev="${SEED_IMAGE_PREFIX}-${GROUP}:latest"
+          if docker pull "$prev" >/dev/null 2>&1; then
+            cid="$(docker create "$prev")"
+            docker cp "$cid:/cache.cow" "$work/previous.cow"
+            docker rm "$cid" >/dev/null
+            echo "found previous seed: $(stat -c %s "$work/previous.cow") bytes"
+            echo "seed=$work/previous.cow" >> "$GITHUB_OUTPUT"
+          else
+            echo "no previous seed for $GROUP; starting empty"
+            echo "seed=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Warm pace group
+        shell: bash
+        env:
+          GROUP: ${{ matrix.group }}
+          SEED: ${{ steps.previous.outputs.seed }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/warm"
           src="$GITHUB_WORKSPACE/pace-src"
-          presets="$(jq -r '.projects[] | select(.name=="pace") | .presets | join(" ")' cpp-ci-image/warm-targets.json)"
-          tests="$(jq -r '.projects[] | select(.name=="pace") | .test_presets | join(" ")' cpp-ci-image/warm-targets.json)"
+          manifest="cpp-ci-image/warm-targets.json"
+          presets="$(jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g) | .presets | join(" ")' "$manifest")"
+          tests="$(jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g) | .test_presets | join(" ")' "$manifest")"
+          seed_args=()
+          if [ -n "$SEED" ]; then
+            cp "$SEED" "$work/seed-in.cow"
+            seed_args=(-e SEED_STORE=/warm/seed-in.cow)
+          fi
+          mkdir -p "$work/out"
           docker run --rm \
             -v "$src:$src" \
             -v "$work:/warm" \
             -v "$GITHUB_WORKSPACE/cpp-ci-image/scripts:/scripts:ro" \
             -e WORKSPACE="$src" \
-            -e STORE=/warm/store/cache.cow \
+            -e STORE=/warm/out/cache.cow \
             -e PRESETS="$presets" \
             -e TEST_PRESETS="$tests" \
             -e WARM_MAX_DISK="${WARM_MAX_DISK:-4g}" \
+            "${seed_args[@]}" \
             -w "$src" \
             "${IMAGE}:${GITHUB_SHA}-base" \
             bash /scripts/warm-project.sh
-          ls -l "$work/store"
+          ls -l "$work/out/cache.cow"
 
-      - name: Build and push pace seed image
+      - name: Push candidate seed for this group
         shell: bash
+        env:
+          GROUP: ${{ matrix.group }}
         run: |
           set -euo pipefail
-          ctx="$RUNNER_TEMP/seed-ctx"
+          ctx="$RUNNER_TEMP/seed-ctx-$GROUP"
           mkdir -p "$ctx"
-          cp "$RUNNER_TEMP/warm/store/cache.cow" "$ctx/cache.cow"
+          cp "$RUNNER_TEMP/warm/out/cache.cow" "$ctx/cache.cow"
           printf 'FROM scratch\nCOPY cache.cow /cache.cow\n' > "$ctx/Dockerfile"
-          seed="ghcr.io/lastrada-software/cpp-ci-seed-pace"
-          docker build -t "${seed}:${GITHUB_SHA}" "$ctx"
-          docker push "${seed}:${GITHUB_SHA}"
+          img="${SEED_IMAGE_PREFIX}-${GROUP}"
+          docker build -t "${img}:${GITHUB_SHA}" "$ctx"
+          docker push "${img}:${GITHUB_SHA}"
 
-  # Bake the seed into the final image, smoke-test it, and move `latest`.
-  # Runs only after a successful warm-up, so a failed warm-up keeps the previous
-  # image, with its previous seed, as `latest`.
+  # Bake the group seeds into the final image, smoke-test it, and push it. Runs
+  # only after every warm-up group succeeded, so a failed group keeps the previous
+  # image, with its previous seeds, as `latest`.
   publish:
     needs: [resolve, warm]
     runs-on: ubuntu-24.04
@@ -217,13 +261,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Assemble seed directory from candidate group seeds
+        shell: bash
+        env:
+          GROUPS: ${{ needs.resolve.outputs.groups }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/seed-ctx"
+          mkdir -p "$ctx/pace"
+          for group in $(jq -r '.[]' <<<"$GROUPS"); do
+            img="${SEED_IMAGE_PREFIX}-${group}:${GITHUB_SHA}"
+            docker pull "$img"
+            cid="$(docker create "$img")"
+            docker cp "$cid:/cache.cow" "$ctx/pace/${group}.cow"
+            docker rm "$cid" >/dev/null
+          done
+          ls -l "$ctx/pace"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
           build-contexts: |
-            pace-seed=docker-image://ghcr.io/lastrada-software/cpp-ci-seed-pace:${{ github.sha }}
+            pace-seed=${{ runner.temp }}/seed-ctx
           build-args: |
             BASE_IMAGE=${{ needs.resolve.outputs.base_image }}
             PACE_REF=${{ needs.resolve.outputs.pace_ref }}
@@ -239,19 +300,25 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm "${IMAGE}:${GITHUB_SHA}" bash -euo pipefail -c '
-            test -f /opt/pace/seed-cache/pace/cache.cow
-            # The seed must open with this image pace-kv. Open a copy, so the
-            # shipped store is not modified.
-            cp /opt/pace/seed-cache/pace/cache.cow /tmp/seed-check.cow
-            pace-kv --bind=127.0.0.1 --port=6675 --storage=/tmp/seed-check.cow \
-                --storage-shards=1 --log-level=warn &
-            KV=$!
-            for _ in $(seq 100); do
-              if (exec 3<>/dev/tcp/127.0.0.1/6675) 2>/dev/null; then break; fi
-              sleep 0.2
+            shopt -s nullglob
+            stores=(/opt/pace/seed-cache/pace/*.cow)
+            test "${#stores[@]}" -gt 0
+            for store in "${stores[@]}"; do
+              # Each seed must open with this image pace-kv. Open a copy, so the
+              # shipped store is not modified.
+              cp "$store" /tmp/seed-check.cow
+              port=6675
+              pace-kv --bind=127.0.0.1 --port=$port --storage=/tmp/seed-check.cow \
+                  --storage-shards=1 --log-level=warn &
+              KV=$!
+              for _ in $(seq 100); do
+                if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then break; fi
+                sleep 0.2
+              done
+              kill -0 "$KV" || { echo "seed $store did not open"; exit 1; }
+              kill -TERM "$KV"; wait "$KV" || true
+              rm -f /tmp/seed-check.cow
             done
-            kill -0 "$KV"
-            kill -TERM "$KV"; wait "$KV" || true
           '
 
       - name: Push image
@@ -259,7 +326,20 @@ jobs:
         run: |
           set -euo pipefail
           docker push "${IMAGE}:${GITHUB_SHA}"
-          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
-            docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:latest"
-            docker push "${IMAGE}:latest"
-          fi
+
+      # Promote on master only: the published group seeds become the starting
+      # point for the next warm-up. Branch runs never move `latest`.
+      - name: Promote seeds and image to latest
+        if: github.ref == 'refs/heads/master'
+        shell: bash
+        env:
+          GROUPS: ${{ needs.resolve.outputs.groups }}
+        run: |
+          set -euo pipefail
+          docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
+          for group in $(jq -r '.[]' <<<"$GROUPS"); do
+            docker buildx imagetools create \
+              --tag "${SEED_IMAGE_PREFIX}-${group}:latest" \
+              "${SEED_IMAGE_PREFIX}-${group}:${GITHUB_SHA}"
+          done

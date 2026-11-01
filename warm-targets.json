@@ -1,23 +1,41 @@
 {
-  "_comment": "Presets warmed into the compile-cache seed. Only pace is onboarded; see README. Windows presets are out of scope (Linux-only image). Coverage presets are excluded: pace-cc binds coverage objects to the checkout root.",
+  "_comment": "Presets warmed into the compile-cache seed. Only pace is onboarded; see README. Windows presets are out of scope (Linux-only image). Coverage presets are excluded: pace-cc binds coverage objects to the checkout root. Each group is warmed by its own parallel job into its own store; a group's store is one file of the seed (pace/<group>.cow).",
   "projects": [
     {
       "name": "pace",
       "repo": "LASTRADA-Software/pace",
-      "presets": [
-        "gcc-debug",
-        "gcc-release",
-        "gate-gcc-release",
-        "clang-debug",
-        "clang-release",
-        "gate-clang-debug",
-        "clang-tracy",
-        "clang-asan-ubsan",
-        "clang-tsan"
-      ],
-      "test_presets": [
-        "gcc-release",
-        "clang-release"
+      "groups": [
+        {
+          "name": "gcc",
+          "presets": [
+            "gcc-debug",
+            "gcc-release",
+            "gate-gcc-release"
+          ],
+          "test_presets": [
+            "gcc-release"
+          ]
+        },
+        {
+          "name": "clang",
+          "presets": [
+            "clang-debug",
+            "clang-release",
+            "gate-clang-debug",
+            "clang-tracy"
+          ],
+          "test_presets": [
+            "clang-release"
+          ]
+        },
+        {
+          "name": "sanitizers",
+          "presets": [
+            "clang-asan-ubsan",
+            "clang-tsan"
+          ],
+          "test_presets": []
+        }
       ]
     }
   ],
