@@ -184,7 +184,7 @@ jobs:
           mkdir -p "$work"
           prev="${SEED_IMAGE_PREFIX}-${GROUP}:latest"
           if docker pull "$prev" >/dev/null 2>&1; then
-            cid="$(docker create "$prev")"
+            cid="$(docker create "$prev" /cache-copy)"
             docker cp "$cid:/cache.cow" "$work/previous.cow"
             docker rm "$cid" >/dev/null
             echo "found previous seed: $(stat -c %s "$work/previous.cow") bytes"
@@ -272,7 +272,7 @@ jobs:
           for group in $(jq -r '.[]' <<<"$GROUPS"); do
             img="${SEED_IMAGE_PREFIX}-${group}:${GITHUB_SHA}"
             docker pull "$img"
-            cid="$(docker create "$img")"
+            cid="$(docker create "$img" /cache-copy)"
             docker cp "$cid:/cache.cow" "$ctx/pace/${group}.cow"
             docker rm "$cid" >/dev/null
           done
