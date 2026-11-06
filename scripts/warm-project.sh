@@ -113,7 +113,9 @@ for preset in $PRESETS; do
             # with no services, which fails a few environment-dependent tests in
             # pace. Build failures still fail the warm-up.
             echo "::group::test $preset"
-            if ! ctest --test-dir "$PACE_BINARY_DIR" --output-on-failure -j"$(nproc)"; then
+            # --timeout bounds each test, so one hung test cannot hold the group until
+            # the job limit cancels it.
+            if ! ctest --test-dir "$PACE_BINARY_DIR" --output-on-failure --timeout 900 -j"$(nproc)"; then
                 echo "::warning::ctest reported failures for $preset (not blocking the seed)"
             fi
             echo "::endgroup::"
