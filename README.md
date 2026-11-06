@@ -58,7 +58,8 @@ onboarded. The blockers are tracked upstream:
 | Group | Presets | Tests run |
 |---|---|---|
 | `gcc` | gcc debug, gcc release, gate-gcc-release | gcc-release |
-| `clang` | clang debug, clang release, gate-clang-debug, clang tracy | clang-release |
+| `clang` | clang debug, clang release | clang-release |
+| `clang-extra` | gate-clang-debug, clang tracy | none |
 | `sanitizers` | clang asan-ubsan, clang tsan | none |
 
 Coverage presets are excluded, because `pace-cc` binds coverage objects to the
@@ -101,6 +102,10 @@ The project checkout sits at the same path inside the container as on the host.
   daemon start-up). The seed depends on what compiled, not on which tests passed.
   This departs from the earlier design, which gated on tests.
 - **Sanitizer and debug presets build only**, without running their tests.
+- **Groups stay under the job limit.** The clang group ran for 5 h 30 min in
+  run 42095583072 and was cancelled by the 330-minute `timeout-minutes`, which
+  skipped `publish`. Its gate and tracy presets moved to `clang-extra`, and
+  `ctest` runs with `--timeout 900`, so one hung test cannot hold a group.
 - **Warm-up runs inside `publish.yml`,** not on a separate schedule. The seed is
   produced by the same `pace-cc`, `pace-kv`, and compilers it is baked beside.
   Cache keys include the compiler banner, and `pace-kv` refuses stores written

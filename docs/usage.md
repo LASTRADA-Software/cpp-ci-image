@@ -110,9 +110,9 @@ deployment rather than assuming that a daemon-only `--tls` switch is enough.
 
 The image exposes `/opt/pace/seed-cache` through `PACE_CACHE_SEED_DIR`. Each
 warmed project has its own read-only subdirectory, and each group of presets has
-its own store file in it. For `pace` the groups are `gcc`, `clang`, and
+its own store file in it. For `pace` the groups are `gcc`, `clang`, `clang-extra`, and
 `sanitizers`, so the stores are `$PACE_CACHE_SEED_DIR/pace/gcc.cow`,
-`.../clang.cow`, and `.../sanitizers.cow`. A job copies the store for the group
+`.../clang.cow`, `.../clang-extra.cow`, and `.../sanitizers.cow`. A job copies the store for the group
 it builds to a writable location before starting a local daemon:
 
 ```sh

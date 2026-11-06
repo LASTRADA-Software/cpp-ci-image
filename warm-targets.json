@@ -20,13 +20,19 @@
           "name": "clang",
           "presets": [
             "clang-debug",
-            "clang-release",
-            "gate-clang-debug",
-            "clang-tracy"
+            "clang-release"
           ],
           "test_presets": [
             "clang-release"
           ]
+        },
+        {
+          "name": "clang-extra",
+          "presets": [
+            "gate-clang-debug",
+            "clang-tracy"
+          ],
+          "test_presets": []
         },
         {
           "name": "sanitizers",
