@@ -79,6 +79,31 @@ fi
 export PACE_ADDR="127.0.0.1:$PORT"
 export PACE_SOURCE_DIR="$WORKSPACE"
 
+# An open port does not mean pace-kv answers yet. Opening a large seed can make
+# the first request slow, and pace's configure-time probe allows only 2s, so a
+# configure started too early comes out with caching disabled. Before
+# configuring, wait until a real pace-cc compile is served.
+wait_for_cache() {
+    local dir="$LOGDIR/ready-probe"
+    mkdir -p "$dir"
+    printf 'int paceWarmReady() { return 0; }\n' > "$dir/ready.cpp"
+    for attempt in $(seq 24); do
+        if (cd "$dir" && PACE_SOURCE_DIR="$dir" PACE_BINARY_DIR="$dir" \
+                PACE_SCHEDULER= PACE_VERBOSE=1 PACE_NO_STATS=1 PACE_TIMEOUT=30s \
+                timeout 60 pace-cc clang++ -c ready.cpp -o ready.o) 2> "$dir/err" \
+            && grep -qE "pace-cc: (HIT|MISS) key=" "$dir/err"; then
+            echo "pace-kv is serving requests (attempt $attempt)"
+            return 0
+        fi
+        kill -0 "$KV" 2>/dev/null || break
+        sleep 5
+    done
+    echo "::error::pace-kv never served a compile; last probe output and pace-kv log follow" >&2
+    cat "$dir/err" "$LOGDIR/pace-kv.log" >&2 || true
+    return 1
+}
+wait_for_cache || exit 1
+
 for preset in $PRESETS; do
     binary_rel="$(python3 "$HERE/resolve-binary-dir.py" "$WORKSPACE/CMakePresets.json" "$preset")"
     export PACE_BINARY_DIR="$WORKSPACE/$binary_rel"
@@ -91,11 +116,19 @@ for preset in $PRESETS; do
     # clang-tidy is off: it runs beside every compile, cache hit or not, and
     # writes nothing to the cache. It only changes CMAKE_CXX_CLANG_TIDY, not the
     # compile command, so the entries are the ones a tidy-enabled consumer looks up.
+    #
+    # CMake only warns when the cache is unusable, so a configure can succeed
+    # with caching off. A warm-up must not run uncached, so that counts as a
+    # failed attempt too: the probe that decided it can be a transient miss.
     configured=""
     for attempt in 1 2 3; do
         if cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF > "$configure_log" 2>&1; then
-            configured=1
-            break
+            if ! grep -q "caching disabled" "$configure_log"; then
+                configured=1
+                break
+            fi
+            echo "::warning::the cache came out disabled for $preset"
+            grep -F "[cache]" "$configure_log" || true
         fi
         if [ "$attempt" -lt 3 ]; then
             echo "::warning::configure attempt $attempt failed for $preset; retrying"
@@ -105,18 +138,15 @@ for preset in $PRESETS; do
     done
     if [ -z "$configured" ]; then
         cat "$configure_log" >&2
-        echo "::error::configure failed for $preset; pace-kv log follows" >&2
+        if grep -q "caching disabled" "$configure_log"; then
+            echo "::error::the cache is disabled for $preset; the warm-up would not be cached" >&2
+        else
+            echo "::error::configure failed for $preset; pace-kv log follows" >&2
+        fi
         cat "$LOGDIR/pace-kv.log" >&2 || true
         exit 1
     fi
     cat "$configure_log"
-    # CMake only warns when the cache is unusable, so a configure can succeed
-    # with caching off. A warm-up must not run uncached.
-    if grep -q "caching disabled" "$configure_log"; then
-        echo "::error::the cache is disabled for $preset; the warm-up would not be cached" >&2
-        cat "$LOGDIR/pace-kv.log" >&2 || true
-        exit 1
-    fi
     echo "::endgroup::"
     echo "::group::build $preset"
     if ! cmake --build "$PACE_BINARY_DIR" -j"$(nproc)"; then
