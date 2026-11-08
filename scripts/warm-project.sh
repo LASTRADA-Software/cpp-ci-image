@@ -84,7 +84,22 @@ for preset in $PRESETS; do
     export PACE_BINARY_DIR="$WORKSPACE/$binary_rel"
     echo "::group::configure $preset"
     configure_log="$LOGDIR/configure-$preset.log"
-    if ! cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON > "$configure_log" 2>&1; then
+    # Configure downloads dependencies (the CPM bootstrap, CPM packages) from
+    # GitHub, and a transient HTTP error there fails it. Retry before failing the
+    # group, so one bad download does not cost a multi-hour warm-up.
+    configured=""
+    for attempt in 1 2 3; do
+        if cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON > "$configure_log" 2>&1; then
+            configured=1
+            break
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo "::warning::configure attempt $attempt failed for $preset; retrying"
+            tail -n 20 "$configure_log"
+            sleep $((attempt * 30))
+        fi
+    done
+    if [ -z "$configured" ]; then
         cat "$configure_log" >&2
         echo "::error::configure failed for $preset; pace-kv log follows" >&2
         cat "$LOGDIR/pace-kv.log" >&2 || true
