@@ -87,9 +87,13 @@ for preset in $PRESETS; do
     # Configure downloads dependencies (the CPM bootstrap, CPM packages) from
     # GitHub, and a transient HTTP error there fails it. Retry before failing the
     # group, so one bad download does not cost a multi-hour warm-up.
+    #
+    # clang-tidy is off: it runs beside every compile, cache hit or not, and
+    # writes nothing to the cache. It only changes CMAKE_CXX_CLANG_TIDY, not the
+    # compile command, so the entries are the ones a tidy-enabled consumer looks up.
     configured=""
     for attempt in 1 2 3; do
-        if cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON > "$configure_log" 2>&1; then
+        if cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF > "$configure_log" 2>&1; then
             configured=1
             break
         fi

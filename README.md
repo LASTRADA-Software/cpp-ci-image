@@ -75,8 +75,11 @@ of scope.
 - if the previous seed exists, starts from a copy of it. A store the new
   `pace-kv` refuses (for example after a storage format change) is discarded,
   and the group starts empty;
-- for each preset, configures with `-DUSE_COMPILER_CACHE=ON` and builds it, and
-  for test presets runs `ctest`;
+- for each preset, configures with `-DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF`
+  and builds it, and for test presets runs `ctest`. clang-tidy is off because
+  it re-runs on every file, even on a cache hit, and adds nothing to the store.
+  It doesn't change the compile command, so the seeded entries still hit for
+  consumers that build with tidy on;
 - fails fast: a failing configure or build stops the group, and a configure that
   disables the cache fails it too;
 - fails if `pace-cc` records no statistics, so an uncached warm-up is never
