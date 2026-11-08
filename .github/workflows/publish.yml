@@ -173,6 +173,42 @@ jobs:
         shell: bash
         run: docker pull "${IMAGE}:${GITHUB_SHA}-base"
 
+      # pace's configure downloads the CPM bootstrap from a GitHub release asset,
+      # and that endpoint returns 5xx often enough to fail whole groups. Fetch it
+      # here instead, into the CPM source cache that is mounted at pace's default
+      # location in the container; CMake skips its own download when the file is
+      # already present with the expected hash. If the release asset stays
+      # unavailable, rebuild it from the git tag the way CPM's release workflow
+      # does (substitute the version). pace's pinned hash is checked either way.
+      - name: Prefetch CPM bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpm="pace-src/cmake/CPM.cmake"
+          version="$(sed -n 's/^set(CPM_DOWNLOAD_VERSION \([^)]*\))/\1/p' "$cpm")"
+          hash="$(sed -n 's/^set(CPM_HASH_SUM "\([0-9a-f]*\)")/\1/p' "$cpm")"
+          test -n "$version" && test -n "$hash"
+          dest="$RUNNER_TEMP/warm/cpm/cpm/CPM_${version}.cmake"
+          mkdir -p "$(dirname "$dest")"
+          verify() { echo "${hash}  ${dest}" | sha256sum -c --status -; }
+          if curl -fsSL --retry 4 --retry-all-errors --retry-delay 10 --retry-max-time 180 \
+               -o "$dest" \
+               "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${version}/CPM.cmake" \
+             && verify; then
+            echo "CPM ${version} bootstrap fetched from the release asset"
+          else
+            echo "::warning::CPM release asset unavailable; rebuilding it from tag v${version}"
+            src="$RUNNER_TEMP/cpm-src"
+            rm -rf "$src"
+            for attempt in 1 2 3; do
+              git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v${version}" \
+                https://github.com/cpm-cmake/CPM.cmake.git "$src" && break
+              rm -rf "$src"; sleep $((attempt * 15))
+            done
+            sed "s/1\.0\.0-development-version/${version}/g" "$src/cmake/CPM.cmake" > "$dest"
+            verify || { echo "::error::rebuilt CPM bootstrap does not match pace's hash"; exit 1; }
+          fi
+
       - name: Fetch previous seed for this group
         id: previous
         shell: bash
@@ -215,6 +251,7 @@ jobs:
           docker run --rm \
             -v "$src:$src" \
             -v "$work:/warm" \
+            -v "$work/cpm:/root/.cache/pace/cpm" \
             -v "$GITHUB_WORKSPACE/cpp-ci-image/scripts:/scripts:ro" \
             -e WORKSPACE="$src" \
             -e STORE=/warm/out/cache.cow \
