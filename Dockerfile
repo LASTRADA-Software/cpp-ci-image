@@ -5,7 +5,11 @@
 ARG BASE_IMAGE
 
 # Shared toolchain layer. Both the pace build stage and the final image derive
-# from it, so the package list lives in exactly one place. gcc-14 is provided
+# from it, so the package list lives in exactly one place. Besides the
+# compilers, it carries the command-line tools a GitHub-hosted runner provides
+# that projects' tests rely on: gawk (Ubuntu's default awk is mawk, which
+# rejects GNU awk scripts), make, ss/lsof/fuser to attribute a listening socket
+# to a process, jq, zip, shellcheck and the like. gcc-14 is provided
 # by Ubuntu 24.04 (noble) itself; no third-party PPA is needed.
 FROM ${BASE_IMAGE} AS toolchain
 
@@ -14,14 +18,19 @@ ARG LLVM_VERSION=22
 RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        bc \
         catch2 \
         ca-certificates \
         cmake \
         curl \
+        file \
+        gawk \
         g++-14 \
         gcc-14 \
         git \
         gpg \
+        iproute2 \
+        jq \
         libgl1-mesa-dev \
         libsqlite3-dev \
         libsqliteodbc \
@@ -29,15 +38,23 @@ RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
         libyaml-cpp-dev \
         libzip-dev \
         lsb-release \
+        lsof \
+        make \
+        netcat-openbsd \
         ninja-build \
         openssl \
         pkg-config \
+        procps \
+        psmisc \
         qt6-base-dev \
         qt6-tools-dev \
         qt6-websockets-dev \
+        shellcheck \
         software-properties-common \
         unixodbc-dev \
+        unzip \
         wget \
+        zip \
     && wget --quiet --tries=3 --waitretry=10 https://apt.llvm.org/llvm.sh \
     && chmod +x llvm.sh \
     && ./llvm.sh ${LLVM_VERSION} \

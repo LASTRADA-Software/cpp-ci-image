@@ -102,9 +102,11 @@ jobs:
           docker run --rm "${IMAGE}:${GITHUB_SHA}-base" bash -euo pipefail -c '
             for tool in gcc g++ gcc-14 g++-14 clang clang++ clang-tidy \
                         clang-22 clang++-22 clang-tidy-22 llvm-symbolizer cmake ninja \
-                        pkg-config pace-cc pace-kv; do
+                        pkg-config pace-cc pace-kv gawk make ss lsof fuser jq \
+                        zip unzip shellcheck; do
               command -v "$tool" >/dev/null || { echo "missing: $tool"; exit 1; }
             done
+            awk --version | head -n1 | grep -q "GNU Awk" || { echo "awk is not GNU awk"; exit 1; }
             gcc --version | head -n1
             clang++ --version | head -n1
             cmake --version | head -n1
