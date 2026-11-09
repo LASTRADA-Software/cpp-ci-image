@@ -25,10 +25,13 @@ authenticated `pace-kv` alone does not distinguish cache readers from writers.
 3. **warm** runs one job per group in parallel, inside the base image. Each job
    starts from the previously published seed for its group, so only translation
    units whose inputs changed are recompiled. Each job pushes its result as a
-   candidate seed image, `cpp-ci-seed-pace-<group>:<sha>`.
-4. **publish** assembles the candidate seeds into the final image, smoke-tests
-   it, and pushes `<sha>`. On `master` it also moves `latest` and each group's
-   seed to the new candidates.
+   candidate seed image, `cpp-ci-seed-pace-<group>:<sha>`. A store that came
+   out byte-identical to the previous seed re-tags the previous seed image, so
+   its layer is not uploaded again.
+4. **publish** smoke-tests the candidate seeds with the base image's `pace-kv`,
+   adds them to `<sha>-base` as one layer per group, and pushes `<sha>`
+   directly from buildkit, so layers the registry already holds are skipped. On
+   `master` it also moves `latest` and each group's seed to the new candidates.
 
 If any warm-up group fails, `publish` does not run, and `latest` stays on the
 previous image with its previous seeds. Consumers pick up each new image
@@ -55,12 +58,12 @@ onboarded. The blockers are tracked upstream:
 
 [`warm-targets.json`](warm-targets.json) lists the groups. `pace` has three:
 
-| Group | Presets | Tests run |
-|---|---|---|
-| `gcc` | gcc debug, gcc release, gate-gcc-release | gcc-release |
-| `clang` | clang debug, clang release | clang-release |
-| `clang-extra` | gate-clang-debug, clang tracy | none |
-| `sanitizers` | clang asan-ubsan, clang tsan | none |
+| Group | Presets |
+|---|---|
+| `gcc` | gcc debug, gcc release, gate-gcc-release |
+| `clang` | clang debug, clang release |
+| `clang-extra` | gate-clang-debug, clang tracy |
+| `sanitizers` | clang asan-ubsan, clang tsan |
 
 Coverage presets are excluded, because `pace-cc` binds coverage objects to the
 checkout root and they never hit from another checkout. Windows presets are out

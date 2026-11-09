@@ -262,23 +262,38 @@ jobs:
             bash /scripts/warm-project.sh
           ls -l "$work/out/cache.cow"
 
+      # When every compile hit, the store comes out byte-identical to the previous
+      # seed. Re-tag the previous seed image instead of building a new one, so its
+      # layer digest stays the same and nothing is uploaded again downstream.
       - name: Push candidate seed for this group
         shell: bash
         env:
           GROUP: ${{ matrix.group }}
+          SEED: ${{ steps.previous.outputs.seed }}
         run: |
           set -euo pipefail
-          ctx="$RUNNER_TEMP/seed-ctx-$GROUP"
-          mkdir -p "$ctx"
-          cp "$RUNNER_TEMP/warm/out/cache.cow" "$ctx/cache.cow"
-          printf 'FROM scratch\nCOPY cache.cow /cache.cow\n' > "$ctx/Dockerfile"
           img="${SEED_IMAGE_PREFIX}-${GROUP}"
-          docker build -t "${img}:${GITHUB_SHA}" "$ctx"
+          out="$RUNNER_TEMP/warm/out/cache.cow"
+          if [ -n "$SEED" ] && cmp -s "$SEED" "$out"; then
+            echo "store unchanged; re-tagging the previous seed"
+            docker tag "${img}:latest" "${img}:${GITHUB_SHA}"
+          else
+            ctx="$RUNNER_TEMP/seed-ctx-$GROUP"
+            mkdir -p "$ctx"
+            cp "$out" "$ctx/cache.cow"
+            printf 'FROM scratch\nCOPY cache.cow /cache.cow\n' > "$ctx/Dockerfile"
+            docker build -t "${img}:${GITHUB_SHA}" "$ctx"
+          fi
           docker push "${img}:${GITHUB_SHA}"
 
-  # Bake the group seeds into the final image, smoke-test it, and push it. Runs
-  # only after every warm-up group succeeded, so a failed group keeps the previous
-  # image, with its previous seeds, as `latest`.
+  # Layer the group seeds on top of the <sha>-base image, smoke-test them with that
+  # image's pace-kv, and push. Runs only after every warm-up group succeeded, so a
+  # failed group keeps the previous image, with its previous seeds, as `latest`.
+  #
+  # The base layers are already in the registry, and each group is its own layer,
+  # so a push uploads only the groups whose store changed. buildkit pushes straight
+  # to the registry: a layer the registry already holds is neither downloaded from
+  # the build cache nor uploaded again.
   publish:
     needs: [resolve, warm]
     runs-on: ubuntu-24.04
@@ -286,8 +301,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -296,7 +309,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Assemble seed directory from candidate group seeds
+      - name: Assemble seed context from candidate group seeds
         shell: bash
         env:
           GROUPS: ${{ needs.resolve.outputs.groups }}
@@ -304,43 +317,34 @@ jobs:
           set -euo pipefail
           ctx="$RUNNER_TEMP/seed-ctx"
           mkdir -p "$ctx/pace"
+          {
+            echo 'ARG BASE'
+            echo 'FROM ${BASE}'
+          } > "$ctx/Dockerfile"
           for group in $(jq -r '.[]' <<<"$GROUPS"); do
             img="${SEED_IMAGE_PREFIX}-${group}:${GITHUB_SHA}"
             docker pull "$img"
             cid="$(docker create "$img" /cache-copy)"
             docker cp "$cid:/cache.cow" "$ctx/pace/${group}.cow"
             docker rm "$cid" >/dev/null
+            docker rmi "$img" >/dev/null
+            echo "COPY pace/${group}.cow /opt/pace/seed-cache/pace/${group}.cow" >> "$ctx/Dockerfile"
           done
           ls -l "$ctx/pace"
+          cat "$ctx/Dockerfile"
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          load: true
-          build-contexts: |
-            pace-seed=${{ runner.temp }}/seed-ctx
-          build-args: |
-            BASE_IMAGE=${{ needs.resolve.outputs.base_image }}
-            PACE_REF=${{ needs.resolve.outputs.pace_ref }}
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.lastrada.pace.ref=${{ needs.resolve.outputs.pace_ref }}
-          cache-from: type=gha,scope=final
-          cache-to: type=gha,mode=max,scope=final
-
-      - name: Smoke test seeded image
+      # Each seed must open with the pace-kv it ships beside, which is the base
+      # image's. Open a copy, so the shipped store is not modified.
+      - name: Smoke test seeds
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" bash -euo pipefail -c '
+          docker run --rm -v "$RUNNER_TEMP/seed-ctx/pace:/seeds:ro" "${IMAGE}:${GITHUB_SHA}-base" \
+            bash -euo pipefail -c '
             shopt -s nullglob
-            stores=(/opt/pace/seed-cache/pace/*.cow)
+            stores=(/seeds/*.cow)
             test "${#stores[@]}" -gt 0
             for store in "${stores[@]}"; do
-              # Each seed must open with this image pace-kv. Open a copy, so the
-              # shipped store is not modified.
               cp "$store" /tmp/seed-check.cow
               port=6675
               pace-kv --bind=127.0.0.1 --port=$port --storage=/tmp/seed-check.cow \
@@ -356,11 +360,16 @@ jobs:
             done
           '
 
-      - name: Push image
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker push "${IMAGE}:${GITHUB_SHA}"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/seed-ctx
+          push: true
+          provenance: false
+          build-args: |
+            BASE=${{ env.IMAGE }}:${{ github.sha }}-base
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=final
+          cache-to: type=gha,mode=max,scope=final
 
       # Promote on master only: the published group seeds become the starting
       # point for the next warm-up. Branch runs never move `latest`.
@@ -371,8 +380,7 @@ jobs:
           GROUPS: ${{ needs.resolve.outputs.groups }}
         run: |
           set -euo pipefail
-          docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:latest"
-          docker push "${IMAGE}:latest"
+          docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}:${GITHUB_SHA}"
           for group in $(jq -r '.[]' <<<"$GROUPS"); do
             docker buildx imagetools create \
               --tag "${SEED_IMAGE_PREFIX}-${group}:latest" \
