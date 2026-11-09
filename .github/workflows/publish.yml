@@ -370,8 +370,13 @@ jobs:
           build-args: |
             BASE=${{ env.IMAGE }}:${{ github.sha }}-base
           tags: ${{ env.IMAGE }}:${{ github.sha }}
-          cache-from: type=gha,scope=final
-          cache-to: type=gha,mode=max,scope=final
+          # Cache metadata travels inline in the pushed image, and the previous
+          # `latest` is the cache source: every layer it could reuse is already in
+          # the registry, so nothing is exported twice. A GitHub Actions cache here
+          # spent 13 minutes uploading the seed layers a second time (run
+          # 42657909119) for a cache the registry already is.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:latest
+          cache-to: type=inline
 
       # Promote on master only: the published group seeds become the starting
       # point for the next warm-up. Branch runs never move `latest`.
