@@ -162,6 +162,12 @@ jobs:
           repository: LASTRADA-Software/pace
           ref: ${{ needs.resolve.outputs.pace_ref }}
           path: pace-src
+          # Full history, as pace's CI checks out: the version comes from
+          # `git describe`, and pace-cc, pace-node and pacectl compile it in as
+          # a definition. A shallow clone falls back to a default version, so
+          # those units were warmed under keys CI never asks for (64 of 1279
+          # gcc-release units missed from a full-depth checkout).
+          fetch-depth: 0
 
       - uses: docker/login-action@v3
         with:
