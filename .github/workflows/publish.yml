@@ -241,7 +241,6 @@ jobs:
           src="$GITHUB_WORKSPACE/pace-src"
           manifest="cpp-ci-image/warm-targets.json"
           presets="$(jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g) | .presets | join(" ")' "$manifest")"
-          tests="$(jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g) | .test_presets | join(" ")' "$manifest")"
           seed_args=()
           if [ -n "$SEED" ]; then
             cp "$SEED" "$work/seed-in.cow"
@@ -256,7 +255,6 @@ jobs:
             -e WORKSPACE="$src" \
             -e STORE=/warm/out/cache.cow \
             -e PRESETS="$presets" \
-            -e TEST_PRESETS="$tests" \
             -e WARM_MAX_DISK="${WARM_MAX_DISK:-4g}" \
             "${seed_args[@]}" \
             -w "$src" \

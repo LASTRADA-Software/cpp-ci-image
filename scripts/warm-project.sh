@@ -15,7 +15,6 @@
 #   STORE         path of the store to write, e.g. /warm/cache.cow
 #   PRESETS       space-separated configure presets to build, in order
 # Optional:
-#   TEST_PRESETS  space-separated subset of PRESETS to run ctest on
 #   SEED_STORE    previous store to start from
 #   WARM_MAX_DISK on-disk cap for the store (default 4g). The cap evicts the
 #                 least recently used entries, so a reused store stays bounded.
@@ -24,7 +23,6 @@ set -euo pipefail
 : "${WORKSPACE:?WORKSPACE is required}"
 : "${STORE:?STORE is required}"
 : "${PRESETS:?PRESETS is required}"
-TEST_PRESETS="${TEST_PRESETS:-}"
 SEED_STORE="${SEED_STORE:-}"
 WARM_MAX_DISK="${WARM_MAX_DISK:-4g}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -155,21 +153,6 @@ for preset in $PRESETS; do
         exit 1
     fi
     echo "::endgroup::"
-    case " $TEST_PRESETS " in
-        *" $preset "*)
-            # Test failures are reported, not gated. The seed depends on what
-            # compiled, not on which tests passed, and the container runs as root
-            # with no services, which fails a few environment-dependent tests in
-            # pace. Build failures still fail the warm-up.
-            echo "::group::test $preset"
-            # --timeout bounds each test, so one hung test cannot hold the group until
-            # the job limit cancels it.
-            if ! ctest --test-dir "$PACE_BINARY_DIR" --output-on-failure --timeout 900 -j"$(nproc)"; then
-                echo "::warning::ctest reported failures for $preset (not blocking the seed)"
-            fi
-            echo "::endgroup::"
-            ;;
-    esac
     pace-cc --show-stats || true
 done
 

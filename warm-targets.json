@@ -11,18 +11,12 @@
             "gcc-debug",
             "gcc-release",
             "gate-gcc-release"
-          ],
-          "test_presets": [
-            "gcc-release"
           ]
         },
         {
           "name": "clang",
           "presets": [
             "clang-debug",
-            "clang-release"
-          ],
-          "test_presets": [
             "clang-release"
           ]
         },
@@ -31,16 +25,14 @@
           "presets": [
             "gate-clang-debug",
             "clang-tracy"
-          ],
-          "test_presets": []
+          ]
         },
         {
           "name": "sanitizers",
           "presets": [
             "clang-asan-ubsan",
             "clang-tsan"
-          ],
-          "test_presets": []
+          ]
         }
       ]
     }

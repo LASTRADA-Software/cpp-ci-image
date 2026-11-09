@@ -76,7 +76,7 @@ of scope.
   `pace-kv` refuses (for example after a storage format change) is discarded,
   and the group starts empty;
 - for each preset, configures with `-DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF`
-  and builds it, and for test presets runs `ctest`. clang-tidy is off because
+  and builds it. clang-tidy is off because
   it re-runs on every file, even on a cache hit, and adds nothing to the store.
   It doesn't change the compile command, so the seeded entries still hit for
   consumers that build with tidy on;
@@ -99,16 +99,14 @@ The project checkout sits at the same path inside the container as on the host.
 - **Promotion on `master` only.** The candidate seeds become the starting point
   for the next warm-up only when the image that contains them is published.
   Branch runs never move `latest`, so their seeds cannot become a starting point.
-- **Gate on build, not on tests.** A build failure fails the warm-up. `ctest`
-  failures are reported as warnings. The container runs as root with no services,
-  so a few of `pace`'s environment-dependent tests fail (a permission check, and
-  daemon start-up). The seed depends on what compiled, not on which tests passed.
-  This departs from the earlier design, which gated on tests.
-- **Sanitizer and debug presets build only**, without running their tests.
+- **Build only, no tests.** The seed depends on what compiled, not on which
+  tests passed, and `ctest` adds no cache entries. It used to run for the gcc
+  and clang release presets, as warnings only, and took about 7.5 minutes per
+  group even when every compile hit (run 42597225082), which made it the
+  critical path of a warm run. A build failure still fails the warm-up.
 - **Groups stay under the job limit.** The clang group ran for 5 h 30 min in
   run 42095583072 and was cancelled by the 330-minute `timeout-minutes`, which
-  skipped `publish`. Its gate and tracy presets moved to `clang-extra`, and
-  `ctest` runs with `--timeout 900`, so one hung test cannot hold a group.
+  skipped `publish`. Its gate and tracy presets moved to `clang-extra`.
 - **Warm-up runs inside `publish.yml`,** not on a separate schedule. The seed is
   produced by the same `pace-cc`, `pace-kv`, and compilers it is baked beside.
   Cache keys include the compiler banner, and `pace-kv` refuses stores written
