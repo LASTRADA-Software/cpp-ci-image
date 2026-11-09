@@ -44,6 +44,7 @@ RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
     && apt-get install -y --no-install-recommends \
         clang-${LLVM_VERSION} \
         clang-tidy-${LLVM_VERSION} \
+        llvm-${LLVM_VERSION} \
     && rm llvm.sh \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/gcc-14 /usr/local/bin/gcc \
@@ -51,6 +52,7 @@ RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
     && ln -s /usr/bin/clang-${LLVM_VERSION} /usr/local/bin/clang \
     && ln -s /usr/bin/clang++-${LLVM_VERSION} /usr/local/bin/clang++ \
     && ln -s /usr/bin/clang-tidy-${LLVM_VERSION} /usr/local/bin/clang-tidy \
+    && ln -s /usr/bin/llvm-symbolizer-${LLVM_VERSION} /usr/local/bin/llvm-symbolizer \
     && mkdir -p /opt/pace/seed-cache
 
 # Build the pace compiler launcher and key-value daemon from a pinned commit.

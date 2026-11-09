@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
           docker run --rm "${IMAGE}:${GITHUB_SHA}-base" bash -euo pipefail -c '
             for tool in gcc g++ gcc-14 g++-14 clang clang++ clang-tidy \
-                        clang-22 clang++-22 clang-tidy-22 cmake ninja \
+                        clang-22 clang++-22 clang-tidy-22 llvm-symbolizer cmake ninja \
                         pkg-config pace-cc pace-kv; do
               command -v "$tool" >/dev/null || { echo "missing: $tool"; exit 1; }
             done
@@ -240,7 +240,9 @@ jobs:
           work="$RUNNER_TEMP/warm"
           src="$GITHUB_WORKSPACE/pace-src"
           manifest="cpp-ci-image/warm-targets.json"
-          presets="$(jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g) | .presets | join(" ")' "$manifest")"
+          jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g)
+              | .presets[] | [.name, (.configure_args | join(" "))] | @tsv' "$manifest" > "$work/presets.tsv"
+          cat "$work/presets.tsv"
           seed_args=()
           if [ -n "$SEED" ]; then
             cp "$SEED" "$work/seed-in.cow"
@@ -254,7 +256,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/cpp-ci-image/scripts:/scripts:ro" \
             -e WORKSPACE="$src" \
             -e STORE=/warm/out/cache.cow \
-            -e PRESETS="$presets" \
+            -e PRESETS_FILE=/warm/presets.tsv \
             -e WARM_MAX_DISK="${WARM_MAX_DISK:-4g}" \
             "${seed_args[@]}" \
             -w "$src" \

@@ -13,7 +13,10 @@
 # Required environment:
 #   WORKSPACE     checkout of the project (also PACE_SOURCE_DIR)
 #   STORE         path of the store to write, e.g. /warm/cache.cow
-#   PRESETS       space-separated configure presets to build, in order
+#   PRESETS_FILE  one line per configure preset to build, in order: the preset
+#                 name, then the extra configure arguments for it, tab-separated
+#                 (arguments space-separated). They must match what the
+#                 project's CI configures that preset with, or nothing hits.
 # Optional:
 #   SEED_STORE    previous store to start from
 #   WARM_MAX_DISK on-disk cap for the store (default 4g). The cap evicts the
@@ -22,7 +25,7 @@ set -euo pipefail
 
 : "${WORKSPACE:?WORKSPACE is required}"
 : "${STORE:?STORE is required}"
-: "${PRESETS:?PRESETS is required}"
+: "${PRESETS_FILE:?PRESETS_FILE is required}"
 SEED_STORE="${SEED_STORE:-}"
 WARM_MAX_DISK="${WARM_MAX_DISK:-4g}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -102,7 +105,9 @@ wait_for_cache() {
 }
 wait_for_cache || exit 1
 
-for preset in $PRESETS; do
+while IFS=$'\t' read -r -u 3 preset preset_args; do
+    [ -n "$preset" ] || continue
+    read -r -a extra_args <<<"${preset_args:-}"
     binary_rel="$(python3 "$HERE/resolve-binary-dir.py" "$WORKSPACE/CMakePresets.json" "$preset")"
     export PACE_BINARY_DIR="$WORKSPACE/$binary_rel"
     echo "::group::configure $preset"
@@ -120,7 +125,8 @@ for preset in $PRESETS; do
     # failed attempt too: the probe that decided it can be a transient miss.
     configured=""
     for attempt in 1 2 3; do
-        if cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF > "$configure_log" 2>&1; then
+        if cmake -S "$WORKSPACE" --preset "$preset" -DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF \
+                "${extra_args[@]}" > "$configure_log" 2>&1; then
             if ! grep -q "caching disabled" "$configure_log"; then
                 configured=1
                 break
@@ -154,7 +160,7 @@ for preset in $PRESETS; do
     fi
     echo "::endgroup::"
     pace-cc --show-stats || true
-done
+done 3< "$PRESETS_FILE"
 
 # A warm-up that never reached pace-cc stored nothing. Fail it rather than publish
 # an empty seed that looks like a successful one.

@@ -65,6 +65,14 @@ onboarded. The blockers are tracked upstream:
 | `clang-extra` | gate-clang-debug, clang tracy |
 | `sanitizers` | clang asan-ubsan, clang tsan |
 
+Each preset carries `configure_args`, which must match the flags pace's
+`build.yml` configures that preset with: `gcc-release` and `clang-release` as
+the `linux` job does, `clang-debug` as `clang-asan-ubsan` does, and `clang-tsan`
+as `clang-tsan` does. A flag that changes a compile definition changes the cache
+key of every translation unit it reaches (`PACE_ENABLE_TLS` adds a PUBLIC define
+to the `Pace` library, so it reaches all of them), and a seed warmed without it
+never hits.
+
 Coverage presets are excluded, because `pace-cc` binds coverage objects to the
 checkout root and they never hit from another checkout. Windows presets are out
 of scope.
@@ -79,7 +87,7 @@ of scope.
   `pace-kv` refuses (for example after a storage format change) is discarded,
   and the group starts empty;
 - for each preset, configures with `-DUSE_COMPILER_CACHE=ON -DENABLE_TIDY=OFF`
-  and builds it. clang-tidy is off because
+  plus the preset's `configure_args`, and builds it. clang-tidy is off because
   it re-runs on every file, even on a cache hit, and adds nothing to the store.
   It doesn't change the compile command, so the seeded entries still hit for
   consumers that build with tidy on;
