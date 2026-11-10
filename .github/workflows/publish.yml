@@ -176,10 +176,12 @@ jobs:
           ref: ${{ needs.resolve.outputs.pace_ref }}
           path: pace-src
           # Full history, as pace's CI checks out: the version comes from
-          # `git describe`, and pace-cc, pace-node and pacectl compile it in as
-          # a definition. A shallow clone falls back to a default version, so
-          # those units were warmed under keys CI never asks for (64 of 1279
-          # gcc-release units missed from a full-depth checkout).
+          # `git describe`, and Pace/Core/Version.hpp spells its triple, which
+          # some 60 units include. A shallow clone falls back to 0.0.0, so
+          # those units were warmed under keys CI never asks for. The warm-up
+          # container runs as root on this runner-owned checkout, so it also
+          # marks the checkout a git safe.directory; without that, git refuses
+          # it as of dubious ownership and the version falls back the same way.
           fetch-depth: 0
 
       # actions/checkout only writes under $GITHUB_WORKSPACE, so move the
@@ -284,6 +286,9 @@ jobs:
             -v "$GITHUB_WORKSPACE/cpp-ci-image/scripts:/scripts:ro" \
             -e WORKSPACE="$src" \
             -e CPM_SOURCE_CACHE="$src/.cache/CPM" \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0="$src" \
             -e STORE=/warm/out/cache.cow \
             -e PRESETS_FILE=/warm/presets.tsv \
             -e WARM_MAX_DISK="${WARM_MAX_DISK:-4g}" \

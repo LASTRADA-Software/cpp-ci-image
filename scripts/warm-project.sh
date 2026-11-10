@@ -152,6 +152,13 @@ while IFS=$'\t' read -r -u 3 preset preset_args; do
     fi
     cat "$configure_log"
     echo "::endgroup::"
+    # pace spells its version in a header many units include. A warm-up that
+    # could not read it from git (a shallow clone, or git refusing the checkout)
+    # caches every one of them under a key CI never computes.
+    if grep -q "\[Version\] string: 0\.0\.0-unknown" "$configure_log"; then
+        echo "::error::$preset configured with the fallback version 0.0.0-unknown; git describe did not answer in $WORKSPACE" >&2
+        exit 1
+    fi
     echo "::group::build $preset"
     if ! cmake --build "$PACE_BINARY_DIR" -j"$(nproc)"; then
         echo "::error::build failed for $preset; pace-kv log follows" >&2
