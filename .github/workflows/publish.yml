@@ -18,6 +18,17 @@ concurrency:
 env:
   IMAGE: ghcr.io/lastrada-software/cpp-ci
   SEED_IMAGE_PREFIX: ghcr.io/lastrada-software/cpp-ci-seed-pace
+  # Where pace's own CI checks pace out: its $GITHUB_WORKSPACE on a hosted
+  # runner. The warm-up builds at exactly this path, because two things in a
+  # pace compile depend on it and pace-cc cannot map either away:
+  #  - tests/CheckoutPaths.hpp spells the checkout path, and 21 gcc-release
+  #    test units include it;
+  #  - CMake names the object of a source outside its target's directory (zstd,
+  #    lz4, catch2's main) by a path relative to the top-level source tree only
+  #    when the source is inside it, and by its absolute path otherwise. pace CI
+  #    keeps CPM's source cache inside the checkout, so the warm-up must too.
+  # Warmed elsewhere, those 43 units missed on every CI run.
+  PACE_CI_WORKSPACE: /home/runner/work/pace/pace
 
 jobs:
   # Resolve immutable inputs and the warm-up groups. Pull requests build and
@@ -171,6 +182,16 @@ jobs:
           # gcc-release units missed from a full-depth checkout).
           fetch-depth: 0
 
+      # actions/checkout only writes under $GITHUB_WORKSPACE, so move the
+      # checkout to the path pace's CI builds at (see PACE_CI_WORKSPACE).
+      - name: Place pace at its CI path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$PACE_CI_WORKSPACE" || { echo "::error::$PACE_CI_WORKSPACE already exists"; exit 1; }
+          mkdir -p "$(dirname "$PACE_CI_WORKSPACE")"
+          mv "$GITHUB_WORKSPACE/pace-src" "$PACE_CI_WORKSPACE"
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -183,8 +204,8 @@ jobs:
 
       # pace's configure downloads the CPM bootstrap from a GitHub release asset,
       # and that endpoint returns 5xx often enough to fail whole groups. Fetch it
-      # here instead, into the CPM source cache that is mounted at pace's default
-      # location in the container; CMake skips its own download when the file is
+      # here instead, into the CPM source cache inside the checkout, where pace's
+      # CI keeps it too (CPM_SOURCE_CACHE); CMake skips its own download when the file is
       # already present with the expected hash. If the release asset stays
       # unavailable, rebuild it from the git tag the way CPM's release workflow
       # does (substitute the version). pace's pinned hash is checked either way.
@@ -192,11 +213,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cpm="pace-src/cmake/CPM.cmake"
+          cpm="$PACE_CI_WORKSPACE/cmake/CPM.cmake"
           version="$(sed -n 's/^set(CPM_DOWNLOAD_VERSION \([^)]*\))/\1/p' "$cpm")"
           hash="$(sed -n 's/^set(CPM_HASH_SUM "\([0-9a-f]*\)")/\1/p' "$cpm")"
           test -n "$version" && test -n "$hash"
-          dest="$RUNNER_TEMP/warm/cpm/cpm/CPM_${version}.cmake"
+          dest="$PACE_CI_WORKSPACE/.cache/CPM/cpm/CPM_${version}.cmake"
           mkdir -p "$(dirname "$dest")"
           verify() { echo "${hash}  ${dest}" | sha256sum -c --status -; }
           if curl -fsSL --retry 4 --retry-all-errors --retry-delay 10 --retry-max-time 180 \
@@ -246,7 +267,7 @@ jobs:
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/warm"
-          src="$GITHUB_WORKSPACE/pace-src"
+          src="$PACE_CI_WORKSPACE"
           manifest="cpp-ci-image/warm-targets.json"
           jq -r --arg g "$GROUP" '.projects[] | select(.name=="pace") | .groups[] | select(.name==$g)
               | .presets[] | [.name, (.configure_args | join(" "))] | @tsv' "$manifest" > "$work/presets.tsv"
@@ -260,9 +281,9 @@ jobs:
           docker run --rm \
             -v "$src:$src" \
             -v "$work:/warm" \
-            -v "$work/cpm:/root/.cache/pace/cpm" \
             -v "$GITHUB_WORKSPACE/cpp-ci-image/scripts:/scripts:ro" \
             -e WORKSPACE="$src" \
+            -e CPM_SOURCE_CACHE="$src/.cache/CPM" \
             -e STORE=/warm/out/cache.cow \
             -e PRESETS_FILE=/warm/presets.tsv \
             -e WARM_MAX_DISK="${WARM_MAX_DISK:-4g}" \

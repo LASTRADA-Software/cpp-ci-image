@@ -98,7 +98,14 @@ of scope.
 - stops `pace-kv` with SIGTERM, so batched writes are flushed, and reopens the
   store once.
 
-The project checkout sits at the same path inside the container as on the host.
+The project checkout sits at the same path inside the container as on the host,
+and that path is pace CI's own checkout path (`PACE_CI_WORKSPACE`,
+`/home/runner/work/pace/pace`), with CPM's source cache inside it at
+`.cache/CPM` as pace CI keeps it. Some compiles depend on these paths in ways
+`pace-cc` cannot map away: pace's generated `tests/CheckoutPaths.hpp` spells the
+checkout path, and CMake names the object files of zstd, lz4 and catch2's main by
+an absolute path when CPM's cache is outside the source tree. Warmed at any other
+path, those 43 gcc-release units miss on every CI run.
 
 ### Decisions
 
