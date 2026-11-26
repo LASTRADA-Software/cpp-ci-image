@@ -111,7 +111,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm "${IMAGE}:${GITHUB_SHA}-base" bash -euo pipefail -c '
-            for tool in gcc g++ gcc-14 g++-14 clang clang++ clang-tidy \
+            for tool in gcc g++ gcc-14 g++-14 gcc-15 g++-15 clang clang++ clang-tidy qmake \
                         clang-22 clang++-22 clang-tidy-22 llvm-symbolizer cmake ninja \
                         pkg-config pace-cc pace-kv gawk make ss lsof fuser jq \
                         zip unzip shellcheck; do
@@ -132,7 +132,40 @@ jobs:
             printf "#include <cstdio>\nint main(){std::puts(\"ok\");}\n" > "$tmp/t.cpp"
             g++ -std=c++23 -o "$tmp/gcc-t" "$tmp/t.cpp"
             clang++ -std=c++23 -stdlib=libstdc++ -o "$tmp/clang-t" "$tmp/t.cpp"
-            "$tmp/gcc-t" && "$tmp/clang-t"
+            g++-15 -std=c++23 -o "$tmp/gcc15-t" "$tmp/t.cpp"
+            "$tmp/gcc-t" && "$tmp/clang-t" && "$tmp/gcc15-t"
+            # gcc and g++ stay GCC 14, and clang stays on GCC 14 libstdc++
+            # although GCC 15 is installed (the clang config files).
+            gcc -dumpversion | grep -qx 14 || { echo "gcc is not GCC 14"; exit 1; }
+            # Captured, not piped: under pipefail, grep -q exiting at its match
+            # fails the pipeline when clang then dies writing to the closed pipe.
+            selected="$(clang++ -v -E -x c++ /dev/null 2>&1)"
+            grep -qx "Selected GCC installation: /usr/lib/gcc/x86_64-linux-gnu/14" <<<"$selected" \
+              || { echo "clang does not select GCC 14"; printf "%s\n" "$selected"; exit 1; }
+            # Qt: every library and the offscreen platform plugin resolve, and a
+            # CMake project finds this Qt with no hint and runs offscreen.
+            # Quick3DSpatialAudio comes with qtmultimedia but links Qt Quick 3D,
+            # which is not installed; nothing here uses it.
+            for lib in "$QT_ROOT_DIR"/lib/libQt6*.so.6 "$QT_ROOT_DIR"/plugins/platforms/libqoffscreen.so; do
+              case "$lib" in */libQt6Quick3DSpatialAudio.so.6) continue ;; esac
+              if ldd "$lib" | grep -q "not found"; then
+                echo "unresolved libraries in $lib"; ldd "$lib" | grep "not found"; exit 1
+              fi
+            done
+            mkdir -p "$tmp/qt"
+            printf "%s\n" \
+              "cmake_minimum_required(VERSION 3.25)" "project(t CXX)" \
+              "find_package(Qt6 6.8 REQUIRED COMPONENTS Gui WebSockets Multimedia Quick)" \
+              "add_executable(t t.cpp)" \
+              "target_link_libraries(t PRIVATE Qt6::Gui Qt6::WebSockets Qt6::Multimedia Qt6::Quick)" \
+              > "$tmp/qt/CMakeLists.txt"
+            printf "%s\n" \
+              "#include <QGuiApplication>" "#include <QWebSocket>" \
+              "int main(int c, char** v) { QGuiApplication app(c, v); QWebSocket s; return QGuiApplication::platformName() == \"offscreen\" ? 0 : 1; }" \
+              > "$tmp/qt/t.cpp"
+            cmake -S "$tmp/qt" -B "$tmp/qt/build" -G Ninja -DCMAKE_CXX_COMPILER=g++ >/dev/null
+            cmake --build "$tmp/qt/build" >/dev/null
+            QT_QPA_PLATFORM=offscreen "$tmp/qt/build/t"
           '
 
       - uses: docker/login-action@v3
