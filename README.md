@@ -3,7 +3,9 @@
 The shared Linux toolchain image for `pace`, `morph`, `Lightweight`, and
 `formula-cpp`.
 
-It includes GCC 14, Clang 22, CMake, Ninja, `pace-cc`, and `pace-kv`. It is
+It includes GCC 14 (the default `gcc`/`g++`), GCC 15 (`gcc-15`/`g++-15`),
+Clang 22 (on GCC 14's libstdc++), Qt 6.8.1 with WebSockets and Multimedia at
+`$QT_ROOT_DIR`, CMake, Ninja, `pace-cc`, and `pace-kv`. It is
 published to GHCR by `.github/workflows/publish.yml`. Consumers use the moving
 `latest` tag, which every successful `master` build advances.
 
